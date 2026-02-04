@@ -1,6 +1,4 @@
 
-
-
 import React, { useMemo } from 'react';
 import { 
     ThemeIdentifier, CustomThemeData, ThemedDeck,
@@ -10,7 +8,8 @@ import {
     IntensityLevel,
     DECK_CATEGORIES,
     getDisplayDataForCard,
-    WOAH_DUDE_DECK
+    WOAH_DUDE_DECK,
+    OFFLINE_DECK
 } from '../services/geminiService';
 import { ThemedDeckButton } from './ThemedDeckButton';
 import { useDragToScroll } from '../hooks/useDragToScroll'; 
@@ -29,6 +28,8 @@ interface ThemeDeckSelectionProps {
   intensityFilters: IntensityLevel[];
   participants: Participant[];
   showAllDecks?: boolean;
+  isOfflineMode?: boolean;
+  onRetryConnection?: () => void;
 }
 
 export const ThemeDeckSelection: React.FC<ThemeDeckSelectionProps> = ({ 
@@ -44,6 +45,8 @@ export const ThemeDeckSelection: React.FC<ThemeDeckSelectionProps> = ({
     intensityFilters,
     participants,
     showAllDecks = false,
+    isOfflineMode = false,
+    onRetryConnection,
 }) => {
   const scrollContainerRef = useDragToScroll<HTMLDivElement>(); 
 
@@ -69,6 +72,52 @@ export const ThemeDeckSelection: React.FC<ThemeDeckSelectionProps> = ({
     });
     return categories;
   }, [visibleDecks]);
+
+  if (isOfflineMode) {
+      return (
+        <div className="w-full h-full flex items-center justify-center p-2 sm:p-3 relative bg-transparent" > 
+            <div className="flex items-center justify-center gap-6 sm:gap-8 max-w-3xl w-full">
+                {/* Offline Deck Button */}
+                <div className={`${deckButtonContainerStyle} w-32 sm:w-40`}>
+                    <ThemedDeckButton
+                        itemId={OFFLINE_DECK.id}
+                        itemName={OFFLINE_DECK.name}
+                        colorClass={getDisplayDataForCard(OFFLINE_DECK.id, customDecks).colorClass}
+                        onDrawClick={() => onDraw(OFFLINE_DECK.id)}
+                        drawActionDisabled={drawActionDisabled}
+                        utilityActionsDisabled={utilityActionsDisabled}
+                        onShowInfo={() => onShowDeckInfo(OFFLINE_DECK.id)}
+                        isDeckSet={true}
+                        visualStyle={OFFLINE_DECK.visualStyle}
+                    />
+                </div>
+
+                {/* Error & Retry UI */}
+                <div className="flex flex-col justify-center items-start text-amber-100/90 max-w-xs space-y-3">
+                    <div>
+                        <h4 className="text-sm sm:text-base font-bold text-amber-400 flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                            </svg>
+                            Connection Interrupted
+                        </h4>
+                        <p className="text-xs sm:text-sm mt-1 leading-snug">
+                            We can't reach the AI service right now. Switched to <strong className="text-amber-200">Offline Mode</strong> so you can keep the conversation going.
+                        </p>
+                    </div>
+                    {onRetryConnection && (
+                        <button 
+                            onClick={onRetryConnection} 
+                            className="text-xs sm:text-sm bg-amber-800/60 hover:bg-amber-700 text-amber-100 px-4 py-2 rounded-md transition-colors border border-amber-600/30 whitespace-nowrap font-semibold shadow-sm"
+                        >
+                            Try Reconnecting
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+      );
+  }
 
   return (
     <div className="w-full h-full flex items-center p-2 sm:p-3 relative bg-transparent" > 

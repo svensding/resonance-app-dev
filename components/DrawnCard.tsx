@@ -89,13 +89,11 @@ const DrawnCardComponent: React.FC<DrawnCardProps> = (props) => {
   const [parsedGuidance, setParsedGuidance] = useState<ParsedGuidanceSection[]>([]);
   const [isFollowUpOnTop, setIsFollowUpOnTop] = useState(true);
   
-  const hasPlayedAudioRef = useRef(false);
   const cardFlipRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setShowCardBackView(false);
     setIsLoadingCardBackAudio(false);
-    hasPlayedAudioRef.current = false;
     
     if (activeFollowUpCard) {
       setIsFollowUpOnTop(true);
@@ -110,46 +108,6 @@ const DrawnCardComponent: React.FC<DrawnCardProps> = (props) => {
     }
   }, [id, isNewest, activeFollowUpCard]);
   
-
-  useEffect(() => {
-    const cardNode = cardFlipRef.current;
-    
-    const handleTransitionEnd = () => {
-      // Play audio for the newest card once it's revealed.
-      // This is the primary audio trigger for most cards.
-      if (isRevealed && isNewest && !hasPlayedAudioRef.current && !isTimed) {
-          hasPlayedAudioRef.current = true;
-          // For a card with a follow-up, let the App.tsx logic decide which audio to play.
-          // For a standalone card, play its own audio.
-          if (!activeFollowUpCard) {
-            onPlayAudioForMainPrompt(props as unknown as DrawnCardData);
-          }
-      }
-    };
-
-    if (cardNode) {
-        cardNode.addEventListener('transitionend', handleTransitionEnd);
-    }
-
-    // Direct audio play for timed cards, as they don't have a flip animation
-    if (isRevealed && isNewest && !hasPlayedAudioRef.current && isTimed && !isFollowUp) {
-      hasPlayedAudioRef.current = true;
-      onPlayAudioForMainPrompt(props as unknown as DrawnCardData);
-    }
-    
-    // Direct audio play for a follow-up card that has just been added
-    if (isRevealed && isNewest && !hasPlayedAudioRef.current && isFollowUp) {
-        hasPlayedAudioRef.current = true;
-        onPlayAudioForMainPrompt(props as unknown as DrawnCardData);
-    }
-
-    return () => {
-        if (cardNode) {
-            cardNode.removeEventListener('transitionend', handleTransitionEnd);
-        }
-    };
-  }, [isRevealed, isNewest, id, onPlayAudioForMainPrompt, props, isFollowUp, isTimed, activeFollowUpCard]);
-
 
   const cardFaceBaseClasses = "rounded-xl shadow-xl flex flex-col overflow-hidden font-normal"; 
   const subtleSolidBorder = "border border-slate-700/60"; 

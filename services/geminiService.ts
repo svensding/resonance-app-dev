@@ -1,10 +1,11 @@
 
-import { GoogleGenAI, GenerateContentResponse, Chat, Content, Type, Schema } from "@google/genai";
+import { GoogleGenAI, GenerateContentResponse, Chat, Content, Type, Schema, Modality } from "@google/genai";
 import { DevLogEntry } from "../components/DevLogSheet";
 
 const API_KEY = process.env.API_KEY;
 let ai: GoogleGenAI | null = null;
-let chatSessions: { [name: string]: { session: Chat, systemInstruction: string } } = {};
+let chatSessions: { [sessionId: string]: Chat } = {};
+let lastActiveSessionId: string | null = null;
 
 if (API_KEY) {
   try {
@@ -14,11 +15,12 @@ if (API_KEY) {
   }
 }
 
-// Updated to the requested Gemini 3 Flash model
+// Optimization: Use Flash for speed
 export const PRIMARY_TEXT_GENERATION_MODEL = 'gemini-3-flash-preview';
-export const FALLBACK_TEXT_GENERATION_MODEL = 'gemini-2.5-flash-latest'; 
+// Updated fallback to a valid model identifier
+export const FALLBACK_TEXT_GENERATION_MODEL = 'gemini-2.0-flash'; 
 const TTS_MODEL = 'gemini-2.5-flash-preview-tts'; 
-const GENERATION_TIMEOUT_MS = 45000; // Increased to 45s to prevent timeouts on complex JSON/Markdown generation
+const GENERATION_TIMEOUT_MS = 45000; 
 
 let activeTextModel = PRIMARY_TEXT_GENERATION_MODEL;
 
@@ -31,20 +33,26 @@ const switchToFallbackModel = () => {
 
 export const resetChatSession = () => {
     chatSessions = {};
+    lastActiveSessionId = null;
     console.log("All chat sessions have been reset.");
 };
 
-export const performHealthCheck = async (addLogEntry?: (entry: DevLogEntry) => void): Promise<{ available: boolean; activeModel: string; error?: string; }> => {
+export const getChatSessionHistory = () => {
+    return Object.keys(chatSessions).map(key => ({ sessionId: key }));
+};
+
+export const performHealthCheck = async (addLogEntry?: (entry: DevLogEntry) => void): Promise<{ available: boolean; activeModel: string; ttsAvailable: boolean; error?: string; isQuotaError?: boolean }> => {
     if (!ai) {
         const error = "Gemini AI not initialized.";
         addLogEntry?.({ type: 'health-check', requestTimestamp: Date.now(), responseTimestamp: Date.now(), data: { input: "Health Check Start", output: "Failed: AI not initialized", error } });
-        return { available: false, activeModel: '', error };
+        return { available: false, activeModel: '', ttsAvailable: false, error };
     }
 
     const log = (status: string, model: string, error?: string) => {
         addLogEntry?.({ type: 'health-check', requestTimestamp: Date.now(), responseTimestamp: Date.now(), data: { input: `Checking model: ${model}`, output: status, error } });
     };
     
+    let ttsAvailable = false;
     const checkTTS = async () => {
         if (!ai) return;
         try {
@@ -55,7 +63,7 @@ export const performHealthCheck = async (addLogEntry?: (entry: DevLogEntry) => v
                     parts: [{ text: 'healthcheck' }]
                 }, 
                 config: {
-                    responseModalities: ['AUDIO'],
+                    responseModalities: [Modality.AUDIO],
                     speechConfig: {
                         voiceConfig: {
                           prebuiltVoiceConfig: { voiceName: DEFAULT_VOICE_NAME },
@@ -64,9 +72,15 @@ export const performHealthCheck = async (addLogEntry?: (entry: DevLogEntry) => v
                 } as any,
             });
             log('Success', TTS_MODEL);
+            ttsAvailable = true;
         } catch (e: any) {
-            console.warn(`Health check failed for TTS model (${TTS_MODEL}). TTS features may not work as expected. Error: ${e.message}`);
-            log('Failure', TTS_MODEL, e.message);
+            console.warn(`Health check failed for TTS model (${TTS_MODEL}). TTS features will be disabled. Error: ${e.message}`);
+            if (e.message?.includes('429') || e.message?.includes('404') || e.message?.includes('RESOURCE_EXHAUSTED')) {
+                 log('Failure (Quota/Missing)', TTS_MODEL, e.message);
+            } else {
+                 log('Failure (General)', TTS_MODEL, e.message);
+            }
+            ttsAvailable = false;
         }
     };
 
@@ -77,7 +91,7 @@ export const performHealthCheck = async (addLogEntry?: (entry: DevLogEntry) => v
         console.log(statusMessage);
         log('Success', PRIMARY_TEXT_GENERATION_MODEL, undefined);
         await checkTTS();
-        return { available: true, activeModel: activeTextModel };
+        return { available: true, activeModel: activeTextModel, ttsAvailable };
     } catch (e: any) {
         const primaryError = `Health check failed for primary model (${PRIMARY_TEXT_GENERATION_MODEL}). Error: ${e.message}. Trying fallback.`;
         console.warn(primaryError);
@@ -90,15 +104,322 @@ export const performHealthCheck = async (addLogEntry?: (entry: DevLogEntry) => v
             console.log(statusMessage);
             log('Success (Fallback)', FALLBACK_TEXT_GENERATION_MODEL, undefined);
             await checkTTS();
-            return { available: true, activeModel: activeTextModel };
+            return { available: true, activeModel: activeTextModel, ttsAvailable };
         } catch (e2: any) {
             const fallbackError = `Health check failed for fallback model (${FALLBACK_TEXT_GENERATION_MODEL}). Service unavailable. Error: ${e2.message}`;
             console.error(fallbackError);
             log('Failure', FALLBACK_TEXT_GENERATION_MODEL, e2.message);
-            return { available: false, activeModel: '', error: "Both primary and fallback AI models are unavailable." };
+            
+            const isQuota = e.message?.includes('429') || e.message?.includes('RESOURCE_EXHAUSTED') || 
+                            e2.message?.includes('429') || e2.message?.includes('RESOURCE_EXHAUSTED');
+
+            return { available: false, activeModel: '', ttsAvailable: false, error: "Both primary and fallback AI models are unavailable.", isQuotaError: isQuota };
         }
     }
 };
+
+export const generateCardFront = async (
+    deck: ThemedDeck | CustomThemeData,
+    groupSetting: SocialContext,
+    numParticipants: number,
+    participantNames: string[],
+    activeParticipantName: string | null,
+    ageFilters: AgeFilters,
+    voiceName: VoiceName,
+    languageCode: LanguageCode,
+    historyLength: number,
+    addLogEntry: (entry: DevLogEntry) => void,
+    shouldGenerateAudio: boolean,
+    options: { disliked: boolean } = { disliked: false }
+): Promise<{
+    text: string;
+    ttsInput: string | null;
+    ttsVoice: VoiceName | null;
+    reflectionText?: string;
+    timerDuration?: number;
+    requestTimestamp: number;
+    responseTimestamp: number;
+    inputPrompt: string;
+    rawLlmOutput: string;
+    error?: string;
+}> => {
+    if (!ai) return { text: "", ttsInput: null, ttsVoice: null, requestTimestamp: Date.now(), responseTimestamp: Date.now(), inputPrompt: "", rawLlmOutput: "", error: "AI not initialized" };
+
+    const requestTimestamp = Date.now();
+    const sessionId = deck.id;
+    let chat = chatSessions[sessionId];
+    lastActiveSessionId = sessionId;
+
+    // Construct System Instruction
+    const contextDesc = `Social Context: ${groupSetting}. Participants: ${numParticipants} (${participantNames.join(', ')}). Active Player: ${activeParticipantName || 'Unknown'}.`;
+    const deckDesc = `Deck: ${deck.name}. Description: ${deck.description}. Intensity: ${(deck.intensity || []).join(', ')}.`;
+    
+    const systemInstruction = `You are Resonance, an AI facilitator for deep human connection. 
+    ${deckDesc}
+    ${contextDesc}
+    Generate a single card prompt. It should be insightful, engaging, and fit the deck theme.
+    
+    Return a JSON object with the following schema:
+    {
+        "text": "The main prompt text to be displayed on the card.",
+        "ttsInput": "Optional. A version of the text optimized for speech synthesis (e.g. phonetic spellings or conversational tweaks). If null, 'text' will be used.",
+        "ttsVoice": "Optional. Recommended voice name.",
+        "reflectionText": "Optional. A follow-up question or reflection prompt if the card is an activity or timed exercise.",
+        "timerDuration": "Optional. Duration in seconds if the card is a timed activity."
+    }
+    `;
+
+    if (!chat) {
+        chat = ai.chats.create({
+            model: activeTextModel,
+            config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        text: { type: Type.STRING },
+                        ttsInput: { type: Type.STRING },
+                        ttsVoice: { type: Type.STRING },
+                        reflectionText: { type: Type.STRING },
+                        timerDuration: { type: Type.INTEGER }
+                    },
+                    required: ["text"]
+                }
+            }
+        });
+        chatSessions[sessionId] = chat;
+    }
+
+    const prompt = options.disliked ? "The previous card was disliked. Generate a different kind of prompt from this deck." : "Draw a card.";
+
+    try {
+        const result = await chat.sendMessage({ message: prompt });
+        const responseTimestamp = Date.now();
+        const jsonText = result.text;
+        
+        let parsed: any = {};
+        try {
+            parsed = JSON.parse(jsonText);
+        } catch (e) {
+             console.error("JSON parse error", e);
+             parsed = { text: jsonText };
+        }
+
+        return {
+            text: parsed.text,
+            ttsInput: parsed.ttsInput || null,
+            ttsVoice: parsed.ttsVoice || null,
+            reflectionText: parsed.reflectionText,
+            timerDuration: parsed.timerDuration,
+            requestTimestamp,
+            responseTimestamp,
+            inputPrompt: prompt,
+            rawLlmOutput: jsonText
+        };
+
+    } catch (e: any) {
+        return {
+            text: "",
+            ttsInput: null,
+            ttsVoice: null,
+            requestTimestamp,
+            responseTimestamp: Date.now(),
+            inputPrompt: prompt,
+            rawLlmOutput: "",
+            error: e.message
+        };
+    }
+}
+
+export const generateCardBack = async (
+    cardText: string,
+    deck: ThemedDeck | CustomThemeData,
+    parentCardText?: string
+): Promise<{
+    cardBackNotesText: string | null;
+    requestTimestamp: number;
+    responseTimestamp: number;
+    inputPrompt: string;
+    rawLlmOutput: string;
+    error?: string;
+}> => {
+     if (!ai) return { cardBackNotesText: null, requestTimestamp: Date.now(), responseTimestamp: Date.now(), inputPrompt: "", rawLlmOutput: "", error: "AI not initialized" };
+     
+     const prompt = `Generate guidance for this card prompt: "${cardText}" from deck "${deck.name}". Include "The Idea", "Getting Started", and "Deeper Dive".`;
+     const requestTimestamp = Date.now();
+     
+     try {
+         const response = await ai.models.generateContent({
+             model: activeTextModel,
+             contents: prompt
+         });
+         return {
+             cardBackNotesText: response.text,
+             requestTimestamp,
+             responseTimestamp: Date.now(),
+             inputPrompt: prompt,
+             rawLlmOutput: response.text
+         };
+     } catch (e: any) {
+         return { cardBackNotesText: null, requestTimestamp, responseTimestamp: Date.now(), inputPrompt: prompt, rawLlmOutput: "", error: e.message };
+     }
+}
+
+export const generateAudioForText = async (
+    text: string,
+    voiceName: VoiceName,
+    styleDirective: string | null
+): Promise<{
+    audioData: string | null;
+    audioMimeType: string | null;
+    requestTimestamp: number;
+    responseTimestamp: number;
+    logData: any;
+    error?: string;
+}> => {
+    if (!ai) return { audioData: null, audioMimeType: null, requestTimestamp: Date.now(), responseTimestamp: Date.now(), logData: {}, error: "AI not initialized" };
+    
+    const requestTimestamp = Date.now();
+    try {
+        const response = await ai.models.generateContent({
+            model: TTS_MODEL,
+            contents: {
+                parts: [{ text: styleDirective ? `${styleDirective} ${text}` : text }]
+            },
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName }
+                    }
+                }
+            }
+        });
+        
+        const audioPart = response.candidates?.[0]?.content?.parts?.[0];
+        if (audioPart?.inlineData) {
+            return {
+                audioData: audioPart.inlineData.data,
+                audioMimeType: audioPart.inlineData.mimeType,
+                requestTimestamp,
+                responseTimestamp: Date.now(),
+                logData: { text, voiceName }
+            };
+        }
+        return { audioData: null, audioMimeType: null, requestTimestamp, responseTimestamp: Date.now(), logData: { text }, error: "No audio data" };
+
+    } catch (e: any) {
+         return { audioData: null, audioMimeType: null, requestTimestamp, responseTimestamp: Date.now(), logData: { text }, error: e.message };
+    }
+}
+
+export const sendFeedbackToChat = async (
+    text: string,
+    feedbackType: 'liked' | 'disliked',
+    addLogEntry: (entry: DevLogEntry) => void
+) => {
+    // If we have an active session, we could send feedback to it.
+    // Since App.tsx calls this without session context, we try to use the last active one or just log.
+    if (lastActiveSessionId && chatSessions[lastActiveSessionId]) {
+        try {
+            const chat = chatSessions[lastActiveSessionId];
+            await chat.sendMessage({ message: `User feedback: The user ${feedbackType} the prompt "${text}".` });
+            addLogEntry({
+                type: 'user-feedback',
+                requestTimestamp: Date.now(),
+                responseTimestamp: Date.now(),
+                data: { input: text, output: feedbackType }
+            });
+        } catch (e) {
+            console.warn("Failed to send feedback to chat session", e);
+        }
+    } else {
+        console.log(`Feedback (No Session): ${feedbackType} for "${text}"`);
+    }
+}
+
+// --- BACKUP CARDS (OFFLINE MODE) ---
+
+const BACKUP_CARDS = [
+    { text: "What is a small, simple thing that brought you a sense of ease or joy today?", category: "INTRODUCTIONS" },
+    { text: "If you could send a message to your younger self, what would you say?", category: "IMAGE_OF_SELF" },
+    { text: "What is a belief you hold that has changed significantly in the last few years?", category: "IMAGE_OF_SELF" },
+    { text: "Describe a moment when you felt truly seen by someone.", category: "INTIMACY_CONNECTION" },
+    { text: "What is something you are currently avoiding?", category: "EDGY_CONFRONTATIONS" },
+    { text: "If fear was not a factor, what is one thing you would do differently right now?", category: "EDGY_CONFRONTATIONS" },
+    { text: "What does 'home' feel like to you?", category: "INTRODUCTIONS" },
+    { text: "Share a memory that you haven't thought about in a long time.", category: "RELATIONAL" },
+    { text: "What is a quality in others that you admire most?", category: "RELATIONAL" },
+    { text: "Close your eyes for 30 seconds. What do you hear?", category: "IMAGE_OF_SELF", isTimed: true, timerDuration: 30 },
+    { text: "What is a dream you've let go of, and why?", category: "IMAGE_OF_SELF" },
+    { text: "When was the last time you felt a sense of awe?", category: "EXTERNAL_VIEWS" },
+    { text: "What is one thing you are grateful for in your life right now?", category: "INTRODUCTIONS" },
+    { text: "Who has had the biggest positive influence on your life?", category: "RELATIONAL" },
+    { text: "If you could have dinner with anyone, living or dead, who would it be and why?", category: "IMAGINATIVE" },
+    { text: "What is a habit you would like to break?", category: "IMAGE_OF_SELF" },
+    { text: "What is a skill you would love to learn?", category: "IMAGE_OF_SELF" },
+    { text: "Describe your perfect day.", category: "IMAGINATIVE" },
+    { text: "What is something that always makes you laugh?", category: "INTRODUCTIONS" },
+    { text: "If you were a character in a book, how would the author describe you?", category: "IMAGINATIVE" }
+];
+
+// Track used indices to avoid repetition until exhausted
+let usedBackupIndices = new Set<number>();
+
+export const drawOfflineCard = (): DrawnCardData => {
+    // Determine available indices
+    const availableIndices = BACKUP_CARDS.map((_, i) => i).filter(i => !usedBackupIndices.has(i));
+    
+    // Reset if all used
+    if (availableIndices.length === 0) {
+        usedBackupIndices.clear();
+        BACKUP_CARDS.forEach((_, i) => availableIndices.push(i));
+    }
+
+    // Pick random from available
+    const randomIndex = availableIndices[Math.floor(Math.random() * availableIndices.length)];
+    usedBackupIndices.add(randomIndex);
+    
+    const randomCard = BACKUP_CARDS[randomIndex];
+    const id = `offline-card-${Date.now()}`;
+    return {
+        id,
+        themedDeckId: 'OFFLINE', 
+        feedback: null,
+        timestamp: Date.now(),
+        text: randomCard.text,
+        ttsInput: null,
+        ttsVoice: null,
+        audioData: null,
+        audioMimeType: null,
+        cardBackNotesText: "**Offline Mode:** This card was drawn from the local backup because the AI service is currently unavailable. Enjoy the conversation!",
+        isTimed: (randomCard as any).isTimed || false,
+        hasFollowUp: false,
+        timerDuration: (randomCard as any).timerDuration || null,
+        followUpPromptText: null,
+        followUpAudioData: null,
+        followUpAudioMimeType: null,
+        isCompletedActivity: false,
+        isFollowUp: false,
+        activeFollowUpCard: null,
+        isFaded: false
+    };
+};
+
+export const OFFLINE_DECK: ThemedDeck = {
+    id: 'OFFLINE', 
+    name: 'Offline Essentials', 
+    category: 'SPECIALS',
+    description: "A curated collection of prompts available when the connection to the stars is temporarily clouded.",
+    intensity: [1, 2, 3],
+    themes: ['Light & Essence', 'Mind & Thoughts'],
+    cardTypes: ['Question'],
+    ageGroups: ['Adults', 'Teens', 'Kids'],
+    // Updated to match look and feel of other decks (Gradient instead of dashed border)
+    visualStyle: 'bg-gradient-to-br from-slate-600 via-slate-700 to-slate-800' 
+};
+
 
 // --- TYPES ---
 
@@ -124,6 +445,22 @@ export const ALL_CORE_THEMES: CoreTheme[] = [
   'Transcendence & Mystery'
 ];
 
+export const THEME_DEFINITIONS: Record<CoreTheme, string> = {
+    'Body & Sensation': "Focus on somatic awareness, felt sense, and physical presence. Ask users to notice tension, breath, and gut feelings.",
+    'Mind & Thoughts': "Explore beliefs, logic, cognitive patterns, and intellectual curiosities. Challenge assumptions.",
+    'Heart & Emotions': "Dive into the landscape of feelings, vulnerability, emotional intelligence, and empathy.",
+    'Shadow & Depth': "Explore the unsaid, the hidden, the repressed, and the uncomfortable with compassion. Do not shy away from darkness.",
+    'Light & Essence': "Focus on joy, core values, gratitude, and the sparks that make life feel meaningful.",
+    'Desire & Intimacy': "Explore wants, needs, eroticism, connection, and the vulnerability of asking for what one craves.",
+    'Parts & Voices': "Invoke Internal Family Systems (IFS). Speak to the inner critic, inner child, protectors, and managers.",
+    'Outer World': "Discuss society, culture, environment, and one's role within the larger collective systems.",
+    'Past & Memory': "Explore personal history, childhood, ancestry, and the stories that have shaped the current self.",
+    'Vision & Future': "Focus on aspirations, legacy, goals, and the potential versions of the self that are emerging.",
+    'Play & Creativity': "Encourage imagination, flow, humor, and non-linear thinking. Be whimsical.",
+    'Spirit & Awe': "Touch on the sacred, the divine, wonder, and moments of reverence or spiritual connection.",
+    'Transcendence & Mystery': "Explore the unknown, the metaphysical, ego-death, and experiences beyond the self."
+};
+
 export type IntensityLevel = 1 | 2 | 3 | 4 | 5;
 export const ALL_INTENSITY_LEVELS: IntensityLevel[] = [1, 2, 3, 4, 5];
 
@@ -141,6 +478,15 @@ export type CardType =
 export const ALL_CARD_TYPES: CardType[] = [
     'Question', 'Directive', 'Reflection', 'Practice', 'Wildcard', 'Connector'
 ];
+
+export const CARD_TYPE_DEFINITIONS: Record<CardType, string> = {
+    'Question': "An open-ended inquiry designed to provoke thought or story. Standard format.",
+    'Directive': "An instruction to do something right now (e.g., 'Close your eyes and...', 'Tell the person to your left...').",
+    'Reflection': "A prompt for internal contemplation, often used for solo journaling or quiet pondering.",
+    'Practice': "A somatic or interactive exercise. Often timed. Involves active participation beyond just speaking.",
+    'Wildcard': "Unexpected, playful, or radical shifts in the conversation. Can be meta-commentary or a game.",
+    'Connector': "Specifically designed to build a bridge between two people. Often asks for shared reality or mutual appreciation."
+};
 
 export interface DeckCategory {
   id: string;
@@ -162,7 +508,6 @@ export interface ThemedDeck {
 }
 
 // --- DATA DEFINITIONS ---
-// (Keeping existing deck data structures)
 
 export const DECK_CATEGORIES: DeckCategory[] = [
     { id: 'SPECIALS', name: 'Specials' },
@@ -211,7 +556,7 @@ export const ALL_THEMED_DECKS: ThemedDeck[] = [
     { id: 'THE_WRITERS_ROOM', name: "The Writer's Room", category: 'IMAGINATIVE', description: "A deck of creative kindling. Sentence stems and fill-in-the-blanks to bypass the blank page and start writing.", intensity: [2, 3], themes: ['Play & Creativity', 'Mind & Thoughts', 'Past & Memory'], cardTypes: ['Reflection'], ageGroups: ['Adults', 'Teens'], socialContexts: ['SOLO'], },
     { id: 'THE_DILEMMA_ENGINE', name: 'The Dilemma Engine', category: 'IMAGINATIVE', description: "Choose your path. A series of intriguing dilemmas that reveal values, priorities, and hidden beliefs.", intensity: [2, 3], themes: ['Mind & Thoughts', 'Light & Essence', 'Outer World'], cardTypes: ['Question'], ageGroups: ['Adults', 'Teens'], },
     { id: 'THE_DREAM_FACTORY', name: 'The Dream Factory', category: 'IMAGINATIVE', description: "A launchpad for imagination. Prompts to generate ideas, play with possibilities, and create something new.", intensity: [2, 3], themes: ['Play & Creativity', 'Vision & Future'], cardTypes: ['Directive', 'Wildcard'], ageGroups: ['Adults', 'Teens', 'Kids'], },
-    { id: 'PATTERN_INTERRUPT', name: 'Pattern Interrupt', category: 'IMAGINATIVE', description: "Feeling stuck or too heavy? Draw from this deck to shift the energy with a jolt of playfulness or a fresh perspective.", intensity: [1, 2], themes: ['Play & Creativity', 'Mind & Thoughts'], cardTypes: ['Wildcard', 'Question'], ageGroups: ['Adults', 'Teens', 'Kids'], },
+    { id: 'PATTERN_INTERRUPT', name: 'Pattern Interrupt', category: 'IMAGINATIVE', description: "Feeling stuck or too heavy? Draw from this deck to shift the energy with a jolt of playfulness or a fresh perspective.", intensity: [1, 2], themes: ['Play & Creativity', 'Mind & Thoughts', 'CardTypes', 'Wildcard', 'Question'], cardTypes: ['Wildcard', 'Question'], ageGroups: ['Adults', 'Teens', 'Kids'], },
     { id: 'THE_SHADOW_CABINET', name: 'The Shadow Cabinet', category: 'EDGY_CONFRONTATIONS', description: "What we hide holds power. A courageous exploration of triggers, shame, and the unowned parts of yourself.", intensity: [3, 4], themes: ['Shadow & Depth', 'Parts & Voices'], cardTypes: ['Question', 'Reflection'], ageGroups: ['Adults', 'Teens'], visualStyle: 'noir-bg', },
     { id: 'ON_THE_EDGE', name: 'On The Edge', category: 'EDGY_CONFRONTATIONS', description: "For conversations that matter. Explore charged topics, withheld truths, and challenging perspectives with intention.", intensity: [4], themes: ['Shadow & Depth', 'Desire & Intimacy', 'Heart & Emotions'], cardTypes: ['Question', 'Directive'], ageGroups: ['Adults'], },
     { id: 'NO_MASKS', name: 'No Masks', category: 'EDGY_CONFRONTATIONS', description: "A space for radical honesty and unfiltered expression. For those ready to meet the depths without reservation.", intensity: [5], themes: ['Shadow & Depth', 'Desire & Intimacy', 'Heart & Emotions', 'Light & Essence', 'Transcendence & Mystery'], cardTypes: ['Question', 'Directive'], ageGroups: ['Adults'], },
@@ -341,6 +686,7 @@ export const getVisibleDecks = (groupSetting: SocialContext, ageFilters: AgeFilt
 
 export const getThemedDeckById = (deckId: ThemedDeck['id']): ThemedDeck | null => {
   if (deckId === 'WOAH_DUDE') return WOAH_DUDE_DECK;
+  if (deckId === 'OFFLINE') return OFFLINE_DECK;
   return ALL_THEMED_DECKS.find(d => d.id === deckId) || null;
 }
 export const getCustomDeckById = (customDeckId: CustomThemeId, customDecks: CustomThemeData[]): CustomThemeData | null => {
@@ -351,6 +697,9 @@ export const getDeckCategoryById = (categoryId: DeckCategory['id']): DeckCategor
 }
 
 export const getDisplayDataForCard = (themedDeckId: ThemeIdentifier, customDecks: CustomThemeData[]): { name: string; colorClass: string; visualStyle?: string } => {
+  if (themedDeckId === 'OFFLINE') {
+      return { name: OFFLINE_DECK.name, colorClass: 'from-slate-700 to-slate-800', visualStyle: OFFLINE_DECK.visualStyle };
+  }
   if (themedDeckId.startsWith("CUSTOM_")) {
     const customDeck = getCustomDeckById(themedDeckId as CustomThemeId, customDecks);
     return { name: customDeck?.name || "Custom Card", colorClass: customDeck?.colorClass || "from-gray-500 to-gray-600" };
@@ -386,479 +735,4 @@ export const getStyleDirectiveForCard = (selectedVoiceName: VoiceName, isForCard
     const cleanedDirective = thematicToneDirective.trim().replace(/\s\s+/g, ' ');
     const finalDirective = `${baseDirective} ${cleanedDirective} Now, speak the following:`;
     return finalDirective.trim().replace(/\s\s+/g, ' ');
-};
-
-// --- SCHEMA DEFINITIONS (Gemini 3) ---
-
-// Defining Schemas using plain objects which are compatible with responseSchema
-// We're avoiding specific @google/genai types inside the objects to minimize import complexity if versions differ, 
-// but using the Type enum helps readability.
-
-const CARD_FRONT_SCHEMA: Schema = {
-    type: Type.OBJECT,
-    properties: {
-        text: { 
-            type: Type.STRING, 
-            description: "The main card prompt text. A single, concise question or directive under 25 words." 
-        },
-        reflectionText: { 
-            type: Type.STRING, 
-            description: "Optional follow-up reflection question. Use ONLY if this is a two-part 'Practice' or 'Directive' card." 
-        },
-        timerDuration: { 
-            type: Type.INTEGER, 
-            description: "Optional duration in seconds. Use ONLY if this is a timed activity. 0 for untimed multi-part." 
-        },
-        ttsInput: {
-            type: Type.STRING,
-            description: "The exact text string to be sent to the TTS engine. It should include the 'Speak with...' style directive."
-        },
-        ttsVoice: {
-            type: Type.STRING,
-            description: "The voice name to be used for TTS."
-        }
-    },
-    required: ["text", "ttsInput", "ttsVoice"]
-};
-
-const CARD_BACK_SCHEMA: Schema = {
-    type: Type.OBJECT,
-    properties: {
-        cardBackNotesText: {
-            type: Type.STRING,
-            description: "The full markdown content for the card back, including headings like **The Idea:**, **Getting Started:**, etc."
-        }
-    },
-    required: ["cardBackNotesText"]
-};
-
-const getChatSession = (sessionName: string, systemInstruction: string, responseSchema?: Schema, addLogEntry?: (entry: DevLogEntry) => void): Chat => {
-    if (!ai) throw new Error("Gemini AI not initialized. Check API Key.");
-
-    const cachedSession = chatSessions[sessionName];
-
-    if (!cachedSession || cachedSession.systemInstruction !== systemInstruction) {
-        if (cachedSession) {
-            console.log(`System instruction for '${sessionName}' session changed. Initializing new chat session.`);
-        } else {
-            console.log(`Initializing new chat session for '${sessionName}'.`);
-        }
-
-        const config: any = { systemInstruction };
-        if (responseSchema) {
-            config.responseMimeType = 'application/json';
-            config.responseSchema = responseSchema;
-        }
-
-        const newSessionData = {
-            session: ai.chats.create({
-                model: activeTextModel,
-                config,
-            }),
-            systemInstruction: systemInstruction,
-        };
-        chatSessions[sessionName] = newSessionData;
-        
-        if (addLogEntry && sessionName === 'cardFront') {
-            addLogEntry({
-                type: 'session-init',
-                requestTimestamp: Date.now(),
-                responseTimestamp: Date.now(),
-                data: {
-                    input: "Chat Session Initialization",
-                    output: { model: activeTextModel, systemInstruction }
-                }
-            });
-        }
-    }
-    return chatSessions[sessionName].session;
-};
-
-
-export const getChatSessionHistory = async (): Promise<Content[]> => {
-    try {
-        const cardFrontSession = chatSessions['cardFront'];
-        if (!cardFrontSession) return [];
-        return await cardFrontSession.session.getHistory();
-    } catch (e) {
-        console.error("Could not retrieve chat history:", e);
-        return [];
-    }
-};
-
-const constructSystemInstructionForCardFront = (): string => {
-  return `
-**Task:** Generate a reflective prompt based on the user's JSON context.
-
-**Content Rules:**
-- The prompt's content and tone must strictly match the provided \`deck\` name, themes, and \`intensity\`.
-- Prompts must be a single, clear action.
-- For 'The Oracle' deck, the prompt must be a direct quote.
-- Review conversation history to ensure variety.
-- **Output must be valid JSON matching the schema.**
-- \`ttsInput\` MUST include the persona directive (e.g., "Speak with [Persona Hint]...") followed by the prompt text in quotes.
-  `.trim();
-};
-
-const constructSystemInstructionForCardBack = (): string => {
-    return `
-**Core Identity:** You are a helpful guide, providing context and depth for a reflection prompt. Your voice is insightful and encouraging.
-**Core Task:** The user will provide a card front prompt. Your job is to generate the corresponding "Card Back Notes" for it.
-**Contextual Awareness:** If a \`contextPrompt\` is provided, bridge the reflection to the initial activity.
-**Output Rules:**
-- **Output must be valid JSON matching the schema.**
-- \`cardBackNotesText\` should contain Markdown.
-- Use these headings in bold: **The Idea:**, **Getting Started:**, **Deeper Dive:**, **Explore Further:**.
-- Keep each section to 1-2 sentences.
-    `.trim();
-};
-
-const constructUserMessageForCardFront = (
-  selectedDeck: ThemedDeck | CustomThemeData, 
-  groupSetting: SocialContext,
-  participantCount: number, 
-  participantNames: string[],
-  activeParticipantName: string | null,
-  ageFilters: AgeFilters,
-  selectedVoiceName: VoiceName,
-  languageCode: LanguageCode,
-  historyLength: number,
-  redrawContext?: { disliked: boolean }
-): string => {
-  
-  const deckContext: any = { name: selectedDeck.name };
-  if ('category' in selectedDeck) {
-    const category = getDeckCategoryById(selectedDeck.category);
-    if (category) deckContext.category = category.name;
-  }
-  
-  if ('themes' in selectedDeck && selectedDeck.themes && selectedDeck.themes.length > 0) {
-      deckContext.themes = selectedDeck.themes;
-  }
-  if ('cardTypes' in selectedDeck && selectedDeck.cardTypes && selectedDeck.cardTypes.length > 0) {
-      deckContext.cardTypes = selectedDeck.cardTypes;
-  }
-  if ('intensity' in selectedDeck && selectedDeck.intensity && selectedDeck.intensity.length > 0) {
-      deckContext.intensity = selectedDeck.intensity;
-  }
-  if ('description' in selectedDeck && selectedDeck.description) {
-      deckContext.description = selectedDeck.description;
-  }
-
-  const activeAgeGroups: AgeGroup[] = [];
-  if (ageFilters.adults) activeAgeGroups.push('Adults');
-  if (ageFilters.teens) activeAgeGroups.push('Teens');
-  if (ageFilters.kids) activeAgeGroups.push('Kids');
-    
-  const socialContext = {
-      setting: groupSetting,
-      participantCount: participantCount,
-      participants: participantNames,
-      activeParticipant: activeParticipantName,
-      ageGroups: activeAgeGroups,
-  };
-
-  const selectedPersona = CURATED_VOICE_PERSONAS.find(p => p.voiceName === selectedVoiceName) 
-        || CURATED_VOICE_PERSONAS.find(p => p.voiceName === DEFAULT_VOICE_NAME)!;
-    
-  const payload = {
-    deck: deckContext,
-    socialContext: socialContext,
-    voicePersona: {
-        name: selectedPersona.name,
-        voice: selectedPersona.voiceName,
-        hint: selectedPersona.voiceAccentHint
-    },
-    language: languageCode,
-    historyLength: historyLength,
-    redraw: redrawContext?.disliked ?? false,
-    firstCard: historyLength === 0 && !redrawContext?.disliked,
-  };
-  
-  const jsonPayload = JSON.stringify(payload, null, 2);
-  return `Context:\n${jsonPayload}`;
-};
-
-
-export const generateCardFront = async (
-    selectedDeck: ThemedDeck | CustomThemeData,
-    groupSetting: SocialContext,
-    participantCount: number,
-    participantNames: string[],
-    activeParticipantName: string | null,
-    ageFilters: AgeFilters,
-    selectedVoiceName: VoiceName,
-    languageCode: LanguageCode,
-    historyLength: number,
-    addLogEntry: (entry: DevLogEntry) => void,
-    redrawContext?: { disliked: boolean }
-): Promise<{ 
-    text: string | null; 
-    reflectionText: string | null; 
-    timerDuration: number | null;
-    ttsInput: string | null;
-    ttsVoice: VoiceName | null;
-    rawLlmOutput: string | null; 
-    error: string | null;
-    requestTimestamp: number;
-    responseTimestamp: number;
-    inputPrompt: string;
-}> => {
-    const requestTimestamp = Date.now();
-    const systemInstruction = constructSystemInstructionForCardFront();
-    
-    const userPrompt = constructUserMessageForCardFront(
-        selectedDeck, groupSetting, participantCount, participantNames, activeParticipantName,
-        ageFilters, selectedVoiceName, languageCode, historyLength, redrawContext
-    );
-
-    try {
-        if (!ai) throw new Error("AI service not available.");
-
-        // We create a new session if instructions change, but reuse otherwise.
-        // Important: For responseSchema to work effectively, we might need to enforce it in config.
-        const chat = getChatSession('cardFront', systemInstruction, CARD_FRONT_SCHEMA, addLogEntry);
-        
-        const response: GenerateContentResponse = await Promise.race([
-            chat.sendMessage({ 
-                message: userPrompt,
-            }),
-            new Promise<any>((_, reject) => 
-                setTimeout(() => reject(new Error("Generation timed out")), GENERATION_TIMEOUT_MS)
-            )
-        ]);
-
-        if (!response || !response.text) {
-             throw new Error("Generation timed out or returned no response.");
-        }
-
-        const rawLlmOutput = response.text;
-        
-        // Parse JSON safely
-        let parsed: any;
-        try {
-            parsed = JSON.parse(rawLlmOutput);
-        } catch (parseError) {
-             console.error("Failed to parse JSON from Schema response", rawLlmOutput);
-             throw new Error("AI returned invalid JSON.");
-        }
-        
-        return {
-            text: parsed.text || null,
-            reflectionText: parsed.reflectionText || null,
-            timerDuration: parsed.timerDuration || null,
-            ttsInput: parsed.ttsInput || null,
-            ttsVoice: (parsed.ttsVoice as VoiceName) || null,
-            rawLlmOutput,
-            error: null,
-            requestTimestamp,
-            responseTimestamp: Date.now(),
-            inputPrompt: userPrompt
-        };
-
-    } catch (e: any) {
-        console.error("Error generating card front:", e);
-        if (e.message.includes("timed out")) {
-            switchToFallbackModel();
-        }
-        return { 
-            text: null, reflectionText: null, timerDuration: null,
-            rawLlmOutput: null, ttsInput: null, ttsVoice: null,
-            error: e.message || "An unknown error occurred during generation.",
-            requestTimestamp, responseTimestamp: Date.now(), inputPrompt: userPrompt
-        };
-    }
-};
-
-export const generateCardBack = async (
-    cardFrontText: string,
-    deckContext: ThemedDeck | CustomThemeData,
-    contextPrompt?: string | null
-): Promise<{
-    cardBackNotesText: string | null;
-    rawLlmOutput: string | null;
-    error: string | null;
-    requestTimestamp: number;
-    responseTimestamp: number;
-    inputPrompt: string;
-}> => {
-    const requestTimestamp = Date.now();
-    let userPrompt = `The card front prompt is: "${cardFrontText}".`;
-
-    if (contextPrompt) {
-        userPrompt += ` This is a reflection on a previous activity. The prompt for that activity was: "${contextPrompt}".`;
-    }
-
-    const deckInfo = ` It is from a deck with the context: "Themes: ${'themes' in deckContext ? deckContext.themes?.join(', ') : 'N/A'}".`;
-    userPrompt += deckInfo;
-    
-    if (!ai) {
-        return { cardBackNotesText: null, rawLlmOutput: null, error: "AI service not available.", requestTimestamp, responseTimestamp: Date.now(), inputPrompt: userPrompt };
-    }
-
-    const systemInstruction = constructSystemInstructionForCardBack();
-    const chat = getChatSession('cardBack', systemInstruction, CARD_BACK_SCHEMA);
-
-    try {
-        const response: GenerateContentResponse = await Promise.race([
-             chat.sendMessage({ message: userPrompt }),
-             new Promise<any>((_, reject) => setTimeout(() => reject(new Error("Card back generation timed out")), GENERATION_TIMEOUT_MS))
-        ]);
-
-        const fullText = response.text;
-        
-        let parsed: any;
-        try {
-            parsed = JSON.parse(fullText || "{}");
-        } catch (e) {
-            console.error("Card back JSON parse error", fullText);
-            throw new Error("Invalid JSON for card back");
-        }
-
-        return { 
-            cardBackNotesText: parsed.cardBackNotesText || null, 
-            rawLlmOutput: fullText,
-            error: null,
-            requestTimestamp,
-            responseTimestamp: Date.now(),
-            inputPrompt: userPrompt
-        };
-
-    } catch (e: any) {
-        console.error("Error generating card back:", e);
-        return { 
-            cardBackNotesText: null, 
-            rawLlmOutput: null,
-            error: e.message || "An unknown error occurred during card back generation.",
-            requestTimestamp,
-            responseTimestamp: Date.now(),
-            inputPrompt: userPrompt
-        };
-    }
-};
-
-interface AudioGenerationResult {
-    audioData: string | null;
-    audioMimeType: string | null;
-    error: string | null;
-    requestTimestamp: number;
-    responseTimestamp: number;
-    logData: {
-        input: string;
-        output: string;
-    }
-}
-
-export const generateAudioForText = async (
-    textToSpeak: string,
-    voiceName: VoiceName,
-    styleDirective: string | null
-): Promise<AudioGenerationResult> => {
-    const requestTimestamp = Date.now();
-    const fullPrompt = styleDirective ? `${styleDirective} "${textToSpeak}"` : textToSpeak;
-    
-    const logData = { input: fullPrompt, output: "" };
-
-    if (!ai) {
-        return { audioData: null, audioMimeType: null, error: "AI service not available.", requestTimestamp, responseTimestamp: Date.now(), logData };
-    }
-
-    try {
-        const result = await Promise.race([
-            ai.models.generateContent({
-                model: TTS_MODEL,
-                contents: {
-                    role: 'user',
-                    parts: [{ text: fullPrompt }]
-                }, 
-                config: {
-                    responseModalities: ['AUDIO'],
-                    speechConfig: {
-                        voiceConfig: {
-                          prebuiltVoiceConfig: { voiceName: voiceName },
-                        },
-                    },
-                } as any
-            }),
-            new Promise<null>((_, reject) => 
-                setTimeout(() => reject(new Error("TTS generation timed out")), GENERATION_TIMEOUT_MS)
-            )
-        ]);
-
-        if (!result) {
-            throw new Error("TTS generation timed out");
-        }
-        
-        // Correctly extract inlineData for Audio modality
-        const candidate = result.candidates?.[0];
-        const part = candidate?.content?.parts?.[0];
-        let audioData: string | null = null;
-
-        if (part) {
-            if (part.inlineData?.data) {
-                audioData = part.inlineData.data;
-            } 
-        }
-
-        if (audioData) {
-            logData.output = `Success: Received ${audioData.length} bytes of audio data.`;
-            return {
-                audioData: audioData,
-                // Manually set the MIME type because speechService expects it to trigger WAV header generation
-                // for raw PCM data. The API doesn't return this specific mime type in the new config style.
-                audioMimeType: 'audio/l16; rate=24000', 
-                error: null,
-                requestTimestamp,
-                responseTimestamp: Date.now(),
-                logData
-            };
-        } else {
-            throw new Error("No audio data received from the API.");
-        }
-    } catch (e: any) {
-        console.error("Error generating audio:", e);
-        logData.output = `Error: ${e.message}`;
-        return {
-            audioData: null, audioMimeType: null,
-            error: e.message || "An unknown error occurred during audio generation.",
-            requestTimestamp, responseTimestamp: Date.now(), logData
-        };
-    }
-};
-
-
-export const sendFeedbackToChat = async (cardText: string, feedback: 'liked' | 'disliked', addLogEntry: (entry: DevLogEntry) => void): Promise<void> => {
-    const cardFrontSession = chatSessions['cardFront'];
-    if (!cardFrontSession) {
-        console.warn("Cannot send feedback: chat session not initialized.");
-        return;
-    }
-
-    const requestTimestamp = Date.now();
-    const feedbackPrompt = `User feedback for the prompt "${cardText}": ${feedback}.`;
-    
-    try {
-        await cardFrontSession.session.sendMessage({ message: feedbackPrompt });
-        addLogEntry({
-            type: 'user-feedback',
-            requestTimestamp,
-            responseTimestamp: Date.now(),
-            data: {
-                input: feedbackPrompt,
-                output: "Feedback acknowledged by the model."
-            }
-        });
-    } catch (e: any) {
-        console.error("Error sending feedback to chat:", e);
-        addLogEntry({
-            type: 'user-feedback',
-            requestTimestamp,
-            responseTimestamp: Date.now(),
-            data: {
-                input: feedbackPrompt,
-                output: "Failed to send feedback.",
-                error: e.message
-            }
-        });
-    }
 };

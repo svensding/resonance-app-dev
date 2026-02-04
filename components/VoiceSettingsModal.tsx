@@ -11,6 +11,8 @@ interface VoiceSettingsModalProps {
   onMuteChange: (muted: boolean) => void;
   onClose: () => void;
   voicePersonas: VoicePersona[];
+  isSystemAvailable?: boolean; 
+  onRetryAvailabilityCheck?: () => Promise<boolean>;
 }
 
 const LanguageButton: React.FC<{
@@ -40,6 +42,8 @@ export const VoiceSettingsModal: React.FC<VoiceSettingsModalProps> = ({
   onMuteChange,
   onClose,
   voicePersonas,
+  isSystemAvailable = true,
+  onRetryAvailabilityCheck,
 }) => {
   const PRESET_LANGUAGES = [
     { code: 'en-US', label: 'English (US)' },
@@ -48,6 +52,7 @@ export const VoiceSettingsModal: React.FC<VoiceSettingsModalProps> = ({
   ];
   const isCustomLanguage = !PRESET_LANGUAGES.some(p => p.code === currentLanguage);
   const [showCustomInput, setShowCustomInput] = useState(isCustomLanguage);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const handleLanguageClick = (code: string) => {
     if (code === 'other') {
@@ -56,6 +61,16 @@ export const VoiceSettingsModal: React.FC<VoiceSettingsModalProps> = ({
       setShowCustomInput(false);
       onLanguageChange(code);
     }
+  };
+
+  const handleRetryClick = async () => {
+      if (!onRetryAvailabilityCheck) return;
+      setIsRetrying(true);
+      try {
+          await onRetryAvailabilityCheck();
+      } finally {
+          setIsRetrying(false);
+      }
   };
 
   const getVoiceButtonLabel = (personaName: string): string => {
@@ -90,29 +105,69 @@ export const VoiceSettingsModal: React.FC<VoiceSettingsModalProps> = ({
 
         <div className="space-y-[2vh] sm:space-y-[3vh] overflow-y-auto scrollbar-thin pr-2 flex-grow">
           {/* Mute Button */}
-          <div className="flex items-center justify-between">
-            <label id="narrationLabel" className="text-[clamp(0.8rem,2vh,1rem)] font-bold text-slate-300">
-              Narration
-            </label>
-            <button
-              onClick={() => onMuteChange(!isMuted)}
-              className={`flex items-center space-x-2 px-3 py-1.5 rounded-full transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-800 focus:ring-sky-500
-                ${isMuted ? 'bg-slate-600 text-slate-300' : 'bg-sky-500 text-white'}`}
-              role="switch"
-              aria-checked={!isMuted}
-              aria-labelledby="narrationLabel"
-            >
-              <span className="text-sm font-semibold">{isMuted ? 'Muted' : 'On'}</span>
-              {isMuted ? (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM12.293 7.293a1 1 0 011.414 0L15 8.586l1.293-1.293a1 1 0 111.414 1.414L16.414 10l1.293 1.293a1 1 0 01-1.414 1.414L15 11.414l-1.293 1.293a1 1 0 01-1.414-1.414L13.586 10l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 3.076a1 1 0 011.09.217l3.707 3.707H17a1 1 0 011 1v4a1 1 0 01-1 1h-2.207l-3.707 3.707a1 1 0 01-1.707-.707V4a1 1 0 01.617-.924zM14 6.924a3.998 3.998 0 00-1.523-3.036 1 1 0 10-1.228 1.56A2 2 0 0112 8v4a2 2 0 01-.751 1.553 1 1 0 101.228 1.56A3.998 3.998 0 0014 13.076V6.924z" /></svg>
-              )}
-            </button>
+          <div className="flex flex-col space-y-2">
+            <div className="flex items-center justify-between">
+                <label id="narrationLabel" className={`text-[clamp(0.8rem,2vh,1rem)] font-bold ${!isSystemAvailable ? 'text-slate-500' : 'text-slate-300'}`}>
+                Narration
+                </label>
+                <button
+                onClick={() => isSystemAvailable && onMuteChange(!isMuted)}
+                disabled={!isSystemAvailable}
+                className={`flex items-center space-x-2 px-3 py-1.5 rounded-full transition-colors duration-200 ease-in-out focus:outline-none
+                    ${!isSystemAvailable 
+                        ? 'bg-slate-700 text-slate-500 cursor-not-allowed opacity-70' 
+                        : isMuted 
+                            ? 'bg-slate-600 text-slate-300 hover:bg-slate-500 focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-800 focus:ring-sky-500' 
+                            : 'bg-sky-500 text-white hover:bg-sky-400 focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-800 focus:ring-sky-500'
+                    }`}
+                role="switch"
+                aria-checked={isSystemAvailable ? !isMuted : false}
+                aria-labelledby="narrationLabel"
+                >
+                <span className="text-sm font-semibold">
+                    {!isSystemAvailable ? 'Unavailable' : isMuted ? 'Muted' : 'On'}
+                </span>
+                {!isSystemAvailable ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M13.477 14.89A6 6 0 015.11 6.524l8.367 8.368zm1.414-1.414L6.524 5.11a6 6 0 018.367 8.367zM18 10a8 8 0 11-16 0 8 8 0 0116 0z" clipRule="evenodd" />
+                    </svg>
+                ) : isMuted ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM12.293 7.293a1 1 0 011.414 0L15 8.586l1.293-1.293a1 1 0 111.414 1.414L16.414 10l1.293 1.293a1 1 0 01-1.414 1.414L15 11.414l-1.293 1.293a1 1 0 01-1.414-1.414L13.586 10l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+                ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 3.076a1 1 0 011.09.217l3.707 3.707H17a1 1 0 011 1v4a1 1 0 01-1 1h-2.207l-3.707 3.707a1 1 0 01-1.707-.707V4a1 1 0 01.617-.924zM14 6.924a3.998 3.998 0 00-1.523-3.036 1 1 0 10-1.228 1.56A2 2 0 0112 8v4a2 2 0 01-.751 1.553 1 1 0 101.228 1.56A3.998 3.998 0 0014 13.076V6.924z" /></svg>
+                )}
+                </button>
+            </div>
+            {!isSystemAvailable && (
+                <div className="bg-amber-900/30 border border-amber-700/50 rounded-md p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <p className="text-xs text-amber-200/90 leading-relaxed">
+                        <strong className="font-bold">Service Notice:</strong> Narration is currently unavailable due to high service traffic on the AI model. Voice features are temporarily disabled.
+                    </p>
+                    {onRetryAvailabilityCheck && (
+                        <button 
+                            onClick={handleRetryClick} 
+                            disabled={isRetrying}
+                            className="flex-shrink-0 px-3 py-1.5 bg-amber-700/40 hover:bg-amber-600/50 border border-amber-600/50 rounded text-xs font-semibold text-amber-100 transition-colors flex items-center gap-2 whitespace-nowrap disabled:opacity-70 disabled:cursor-not-allowed"
+                        >
+                            {isRetrying ? (
+                                <>
+                                <svg className="animate-spin h-3 w-3 text-amber-100" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    Checking...
+                                </>
+                            ) : (
+                                "Check Connection"
+                            )}
+                        </button>
+                    )}
+                </div>
+            )}
           </div>
           
           {/* Voice Selection */}
-          <div>
+          <div className={`${!isSystemAvailable ? 'opacity-50 pointer-events-none' : ''}`}>
             <label className="block text-[clamp(0.8rem,2vh,1rem)] font-bold text-slate-300 mb-3">
               Narration Voice
             </label>
@@ -139,8 +194,8 @@ export const VoiceSettingsModal: React.FC<VoiceSettingsModalProps> = ({
             </div>
           </div>
           
-          {/* Language Selection */}
-          <div className="border-t border-slate-700/80 pt-[2vh] sm:pt-[3vh]">
+          {/* Language Selection - Always Enabled */}
+          <div className={`border-t border-slate-700/80 pt-[2vh] sm:pt-[3vh]`}>
             <label className="block text-[clamp(0.7rem,1.8vh,0.9rem)] font-bold text-slate-300 mb-2">
               Language
             </label>

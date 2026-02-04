@@ -1,5 +1,4 @@
 
-
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { DrawnCardDisplayData as SingleDrawnCardData } from './components/DrawnCard'; 
 import { 
@@ -36,6 +35,8 @@ import {
   CUSTOM_DECK_COLOR_PALETTE,
   performHealthCheck,
   resetChatSession,
+  drawOfflineCard,
+  OFFLINE_DECK,
 } from './services/geminiService';
 import { playAudioData, speakText, stopSpeechServicePlayback, resumeAudioContext } from './services/speechService'; 
 import { ApiKeyMessage } from './components/ApiKeyMessage';
@@ -53,7 +54,7 @@ import { CardShuffleAnimation } from './components/CardShuffleAnimation';
 const MAX_HISTORY_WITH_AUDIO = 13; 
 
 const LOCALSTORAGE_KEYS = {
-  CUSTOM_DECKS: 'resonanceClio_customDecks_v4', // version bump for new data structure
+  CUSTOM_DECKS: 'resonanceClio_customDecks_v4', 
   VOICE_NAME: 'resonanceClio_selectedVoiceName_v1',
   LANGUAGE_CODE: 'resonanceClio_selectedLanguageCode_v1',
   IS_MUTED: 'resonanceClio_isAudioMuted_v1',
@@ -110,6 +111,10 @@ const App: React.FC = () => {
   const [ageFilters, setAgeFilters] = useState<AgeFilters>(() => loadFromLocalStorage<AgeFilters>(LOCALSTORAGE_KEYS.AGE_FILTERS, { adults: true, teens: false, kids: false }));
   const [intensityFilters, setIntensityFilters] = useState<IntensityLevel[]>(() => loadFromLocalStorage<IntensityLevel[]>(LOCALSTORAGE_KEYS.INTENSITY_FILTERS, ALL_INTENSITY_LEVELS));
   
+  // New State for System Capability
+  const [isTtsSystemAvailable, setIsTtsSystemAvailable] = useState<boolean>(true);
+  const [isOfflineMode, setIsOfflineMode] = useState<boolean>(false);
+
   const [showDevLogSheet, setShowDevLogSheet] = useState(false);
   const [devLog, setDevLog] = useState<DevLogEntry[]>([]);
   const [showDevFeatures, setShowDevFeatures] = useState(false);
@@ -158,14 +163,24 @@ const App: React.FC = () => {
 
 
   useEffect(() => {
-    console.log("App mounted. Resonance (Gemini 3 Update).");
+    console.log("App mounted. Resonance (Gemini 3 Update - Complete Waterfall).");
     if (!process.env.API_KEY) {
       setApiKeyMissing(true);
       setError("API_KEY for Gemini is not configured.");
     } else {
         performHealthCheck(addLogEntry).then(status => {
             if (!status.available) {
-                setError(status.error || 'The AI service is currently unavailable. Please try again later.');
+                // Instead of a hard error, switch to Offline Mode if quota or other issues
+                setIsOfflineMode(true);
+                // Clear any previous general error if we are switching to offline mode handling
+                setError(null);
+            } else {
+                setIsOfflineMode(false);
+                setError(null);
+            }
+            setIsTtsSystemAvailable(status.ttsAvailable);
+            if (!status.ttsAvailable) {
+                console.warn("TTS System unavailable (likely quota exhausted). Voice features automatically disabled.");
             }
         });
     }
@@ -197,6 +212,17 @@ const App: React.FC = () => {
     setActiveCardAudio(null);
   }, []);
 
+  const handleRetryConnection = useCallback(async () => {
+      const status = await performHealthCheck(addLogEntry);
+      if (status.available) {
+          setIsOfflineMode(false);
+      } else {
+          setIsOfflineMode(true);
+      }
+      setIsTtsSystemAvailable(status.ttsAvailable);
+      return status.available;
+  }, [addLogEntry]);
+
     const handlePlayAudioForMainPrompt = useCallback(async (
       card: DrawnCardData
     ) => {
@@ -217,7 +243,7 @@ const App: React.FC = () => {
             return;
         }
 
-        if (card.ttsInput && card.ttsVoice) {
+        if (card.ttsInput && card.ttsVoice && isTtsSystemAvailable && !isOfflineMode) {
             const audioResult = await generateAudioForText(card.ttsInput, card.ttsVoice, null);
             addLogEntry({
                 type: 'tts',
@@ -235,16 +261,23 @@ const App: React.FC = () => {
                 setActiveCardAudio(null);
             }
         } else if (card.text) { 
+            // Fallback to browser synthesis if Gemini TTS failed or text is available but no TTS instructions
             speakText(card.text, selectedLanguageCode, isAudioMuted, onPlaybackEnd);
         } else {
             setActiveCardAudio(null);
         }
-    }, [isAudioMuted, selectedLanguageCode, handleStopAudio, addLogEntry]);
+    }, [isAudioMuted, selectedLanguageCode, handleStopAudio, addLogEntry, isTtsSystemAvailable, isOfflineMode]);
 
   const handleFetchAndPlayCardBackAudio = useCallback(async (cardId: string, textToSpeak: string) => {
     handleStopAudio();
     // Resume context to ensure playback is authorized
     await resumeAudioContext();
+
+    // Guard: If system TTS is down, don't attempt fetch
+    if (!isTtsSystemAvailable || isOfflineMode) {
+        console.warn("TTS System is unavailable or in Offline Mode. Skipping card back audio generation.");
+        return;
+    }
 
     setActiveCardAudio({ cardId, type: 'notes' });
 
@@ -280,7 +313,7 @@ const App: React.FC = () => {
         setError("Could not generate guidance audio.");
         setActiveCardAudio(null);
     }
-  }, [selectedVoiceName, isAudioMuted, drawnCardHistory, handleStopAudio, addLogEntry, customDecks]);
+  }, [selectedVoiceName, isAudioMuted, drawnCardHistory, handleStopAudio, addLogEntry, customDecks, isTtsSystemAvailable, isOfflineMode]);
   
   const handleDrawNewCard = useCallback(async (itemId: ThemeIdentifier | "RANDOM" | `CATEGORY_${string}`, options?: { isRedraw?: boolean }) => {
     if (isLoading || isShuffling) return;
@@ -299,6 +332,36 @@ const App: React.FC = () => {
 
         try {
             let colorsForShuffle: string[] = [];
+            
+            // --- OFFLINE MODE HANDLER ---
+            if (isOfflineMode) {
+                // Simulate network delay for better UX
+                await new Promise(resolve => setTimeout(resolve, 800));
+                
+                const offlineCard = drawOfflineCard();
+                const activeParticipant = participants.find(p => p.id === activeParticipantId);
+                offlineCard.drawnForParticipantId = activeParticipantId;
+                offlineCard.drawnForParticipantName = activeParticipant?.name || null;
+                
+                // Color for offline shuffle
+                colorsForShuffle = [getDisplayDataForCard(OFFLINE_DECK.id, customDecks).colorClass];
+                setShuffleColorClasses(colorsForShuffle); // Trigger animation color
+
+                setDrawnCardHistory(prev => [offlineCard, ...prev.slice(0, MAX_HISTORY_WITH_AUDIO - 1)]);
+                
+                // Next turn logic
+                if (participants.length > 1 && !options?.isRedraw && !offlineCard.isTimed) {
+                    const currentIndex = participants.findIndex(p => p.id === activeParticipantId);
+                    const nextIndex = (currentIndex + 1) % participants.length;
+                    setActiveParticipantId(participants[nextIndex].id);
+                }
+                
+                setIsShuffling(false);
+                setIsLoading(false);
+                return; // Done
+            }
+
+            // --- ONLINE MODE HANDLER ---
             const visibleDecks = getVisibleDecks(selectedGroupSetting, ageFilters, intensityFilters, showDevFeatures);
 
             if (itemId === "RANDOM") {
@@ -329,9 +392,14 @@ const App: React.FC = () => {
         
             const activePName = participants.find(p => p.id === activeParticipantId)?.name || null;
             
+            // Determine effective TTS capability for this draw
+            const shouldGenerateAudio = !isAudioMuted && isTtsSystemAvailable;
+
+            // --- 1. GENERATE TEXT ---
+            // Pass shouldGenerateAudio to tell the LLM whether to include TTS instructions/fields
             const frontResult = await generateCardFront(
                 chosenDeck, selectedGroupSetting, participants.length, participants.map(p => p.name).filter(Boolean), activePName,
-                ageFilters, selectedVoiceName, selectedLanguageCode, drawnCardHistory.length, addLogEntry, { disliked: options?.isRedraw ?? false }
+                ageFilters, selectedVoiceName, selectedLanguageCode, drawnCardHistory.length, addLogEntry, shouldGenerateAudio, { disliked: options?.isRedraw ?? false }
             );
 
             addLogEntry({
@@ -342,55 +410,41 @@ const App: React.FC = () => {
             });
             
             if (frontResult.error || !frontResult.text) {
+                // If specific quota error occurs during draw, switch to offline mode
+                if (frontResult.error?.includes('429') || frontResult.error?.includes('quota') || frontResult.error?.includes('RESOURCE_EXHAUSTED')) {
+                    setIsOfflineMode(true);
+                    throw new Error("Service is currently busy. Switching to Offline Mode.");
+                }
                 throw new Error(frontResult.error || "The AI returned an incomplete or invalid response. Please try drawing again.");
             }
-            
-            let audioPromise;
-            if (!isAudioMuted && frontResult.ttsInput && frontResult.ttsInput.trim().length > 0 && frontResult.ttsVoice) {
-                audioPromise = generateAudioForText(frontResult.ttsInput, frontResult.ttsVoice, null);
-            } 
-            else if (!isAudioMuted && frontResult.text) {
-                console.warn("Forcing TTS generation due to missing or invalid LLM TTS data.");
-                addLogEntry({
-                    type: 'tts',
-                    requestTimestamp: Date.now(),
-                    responseTimestamp: Date.now(),
-                    data: { input: frontResult.text, output: "Forcing TTS generation...", context: "TTS Fallback" }
-                });
-                const deckForStyle = 'themes' in chosenDeck ? chosenDeck : getCustomDeckById(chosenDeck.id, customDecks);
-                const styleDirective = getStyleDirectiveForCard(selectedVoiceName, false, deckForStyle);
-                const ttsPrompt = `${styleDirective} "${frontResult.text}"`;
-                audioPromise = generateAudioForText(ttsPrompt, selectedVoiceName, null);
-            } 
-            else {
-                audioPromise = Promise.resolve(null);
-            }
-            
-            const followUpAudioPromise = (isAudioMuted || !frontResult.reflectionText)
-                ? Promise.resolve(null)
-                : generateAudioForText(
-                    `"${frontResult.reflectionText}"`, 
-                    selectedVoiceName, 
-                    getStyleDirectiveForCard(selectedVoiceName, false, 'themes' in chosenDeck ? chosenDeck : getCustomDeckById(chosenDeck.id, customDecks))
-                  );
 
-            const cardBackPromise = generateCardBack(frontResult.text, chosenDeck);
+            // --- 2. GENERATE AUDIO (IF ENABLED & SYSTEM CAPABLE) ---
+            // We wait for this BEFORE rendering to ensure simultaneous appearance
+            let generatedAudioData: string | null = null;
+            let generatedAudioMimeType: string | null = null;
 
-            const [audioGenResult, followUpAudioGenResult, backResult] = await Promise.all([audioPromise, followUpAudioPromise, cardBackPromise]);
+            if (shouldGenerateAudio) {
+                // If text generated TTS input, use it. Otherwise construct it (fallback logic, though LLM should provide it if enabled).
+                const audioPromise = (frontResult.ttsInput && frontResult.ttsInput.trim().length > 0 && frontResult.ttsVoice)
+                    ? generateAudioForText(frontResult.ttsInput, frontResult.ttsVoice, null)
+                    : (frontResult.text ? generateAudioForText(`${getStyleDirectiveForCard(selectedVoiceName, false, 'themes' in chosenDeck ? chosenDeck : getCustomDeckById(chosenDeck.id, customDecks))} "${frontResult.text}"`, selectedVoiceName, null) : Promise.resolve(null));
 
-            if (audioGenResult) {
-                addLogEntry({ type: 'tts', requestTimestamp: audioGenResult.requestTimestamp, responseTimestamp: audioGenResult.responseTimestamp, data: { ...audioGenResult.logData, error: audioGenResult.error }});
-                if (audioGenResult.error) setError(`Audio narration failed: ${audioGenResult.error}`);
-            }
-            if (followUpAudioGenResult) {
-                addLogEntry({ type: 'tts', requestTimestamp: followUpAudioGenResult.requestTimestamp, responseTimestamp: followUpAudioGenResult.responseTimestamp, data: { ...followUpAudioGenResult.logData, error: followUpAudioGenResult.error, context: 'Pre-fetching for follow-up card' }});
+                const audioGenResult = await audioPromise; // WAIT HERE
+
+                if (audioGenResult) {
+                    addLogEntry({ type: 'tts', requestTimestamp: audioGenResult.requestTimestamp, responseTimestamp: audioGenResult.responseTimestamp, data: { ...audioGenResult.logData, error: audioGenResult.error, context: 'Pre-Render Audio Load' }});
+                    
+                    if (audioGenResult.audioData && audioGenResult.audioMimeType) {
+                        generatedAudioData = audioGenResult.audioData;
+                        generatedAudioMimeType = audioGenResult.audioMimeType;
+                    }
+                }
             }
 
-            addLogEntry({ type: 'chat-back', requestTimestamp: backResult.requestTimestamp, responseTimestamp: backResult.responseTimestamp, data: { input: backResult.inputPrompt, output: backResult.rawLlmOutput, error: backResult.error }});
-
+            // --- 3. RENDER STATE (TEXT + AUDIO READY) ---
             const newCardId = `card-${Date.now()}`;
             const activeParticipant = participants.find(p => p.id === activeParticipantId);
-            const isTimed = !!frontResult.reflectionText; // Presence of reflection text implies activity in new schema
+            const isTimed = !!frontResult.reflectionText; 
 
             const newCard: DrawnCardData = {
                 id: newCardId,
@@ -403,41 +457,79 @@ const App: React.FC = () => {
                 text: frontResult.text,
                 ttsInput: frontResult.ttsInput,
                 ttsVoice: frontResult.ttsVoice,
-                audioData: audioGenResult?.audioData || null,
-                audioMimeType: audioGenResult?.audioMimeType || null,
-                cardBackNotesText: backResult?.cardBackNotesText || null,
+                audioData: generatedAudioData, 
+                audioMimeType: generatedAudioMimeType, 
+                cardBackNotesText: null, // Placeholder
                 isTimed: isTimed,
                 hasFollowUp: isTimed,
                 timerDuration: frontResult.timerDuration,
                 followUpPromptText: frontResult.reflectionText || null,
-                followUpAudioData: followUpAudioGenResult?.audioData || null,
-                followUpAudioMimeType: followUpAudioGenResult?.audioMimeType || null,
+                followUpAudioData: null,
+                followUpAudioMimeType: null,
                 isCompletedActivity: false,
                 isFollowUp: false,
                 activeFollowUpCard: null,
             };
             
+            // Update History immediately so the user sees the card
             setDrawnCardHistory(prev => [newCard, ...prev.slice(0, MAX_HISTORY_WITH_AUDIO - 1)]);
-            
+            setIsShuffling(false); // Stop animation
+            setIsLoading(false); // Unlock UI
+
+            // Move to next participant if applicable
             if (participants.length > 1 && !options?.isRedraw && !newCard.isTimed) {
                 const currentIndex = participants.findIndex(p => p.id === activeParticipantId);
                 const nextIndex = (currentIndex + 1) % participants.length;
                 setActiveParticipantId(participants[nextIndex].id);
             }
 
+            // Play Audio Immediately if we have it
+            if (generatedAudioData && generatedAudioMimeType && !isAudioMuted) {
+                 playAudioData(generatedAudioData, generatedAudioMimeType, isAudioMuted, () => setActiveCardAudio(null));
+                 setActiveCardAudio({ cardId: newCardId, type: 'prompt' });
+            }
+
+            // --- 4. BACKGROUND TASKS: FOLLOW-UP AUDIO & BACK ---
+
+            // Task B: Generate Follow-up Audio (If applicable AND system capable)
+            if (frontResult.reflectionText && shouldGenerateAudio) {
+                 generateAudioForText(
+                    `"${frontResult.reflectionText}"`, 
+                    selectedVoiceName, 
+                    getStyleDirectiveForCard(selectedVoiceName, false, 'themes' in chosenDeck ? chosenDeck : getCustomDeckById(chosenDeck.id, customDecks))
+                  ).then(res => {
+                      if (res && res.audioData) {
+                          setDrawnCardHistory(prev => prev.map(c => 
+                                c.id === newCardId ? { ...c, followUpAudioData: res.audioData, followUpAudioMimeType: res.audioMimeType } : c
+                            ));
+                      }
+                  });
+            }
+
+            // Task C: Generate Card Back
+            generateCardBack(frontResult.text, chosenDeck).then(backResult => {
+                addLogEntry({ type: 'chat-back', requestTimestamp: backResult.requestTimestamp, responseTimestamp: backResult.responseTimestamp, data: { input: backResult.inputPrompt, output: backResult.rawLlmOutput, error: backResult.error, context: 'Background Back Load' }});
+                if (backResult.cardBackNotesText) {
+                    setDrawnCardHistory(prev => prev.map(c => 
+                        c.id === newCardId ? { ...c, cardBackNotesText: backResult.cardBackNotesText } : c
+                    ));
+                }
+            }).catch(e => console.error("Background card back generation failed", e));
+
+
         } catch (err: any) {
             console.error("Error drawing card:", err.message ? JSON.stringify(err.message) : JSON.stringify(err));
             setError(err.message || "An unknown error occurred while drawing the card.");
-        } finally {
             setIsShuffling(false);
             setIsLoading(false);
+        } finally {
             setShuffleColorClasses([]);
         }
     };
     
     await performDraw();
 
-  }, [isLoading, isShuffling, participants, activeParticipantId, customDecks, selectedVoiceName, selectedLanguageCode, handleStopAudio, isAudioMuted, selectedGroupSetting, ageFilters, intensityFilters, drawnCardHistory.length, addLogEntry, showDevFeatures]);
+  }, [isLoading, isShuffling, participants, activeParticipantId, customDecks, selectedVoiceName, selectedLanguageCode, handleStopAudio, isAudioMuted, selectedGroupSetting, ageFilters, intensityFilters, drawnCardHistory.length, addLogEntry, showDevFeatures, isTtsSystemAvailable, isOfflineMode]);
 
   useEffect(() => {
     const sourceCard = drawnCardHistory.find(c =>
@@ -455,7 +547,7 @@ const App: React.FC = () => {
         const followUpText = cardToUpdate.followUpPromptText!;
         const themeItem = getThemedDeckById(cardToUpdate.themedDeckId as ThemedDeck['id']) || getCustomDeckById(cardToUpdate.themedDeckId as CustomThemeId, customDecks);
         
-        if (!themeItem) {
+        if (!themeItem && !isOfflineMode) {
           setError("Could not find the theme for the follow-up prompt.");
           setIsLoading(false);
           return;
@@ -484,24 +576,25 @@ const App: React.FC = () => {
         };
         
         setDrawnCardHistory(prev => prev.map(c => c.id === cardToUpdate.id ? { ...c, activeFollowUpCard: placeholderFollowUpCard } : c));
-
-        const backResult = await generateCardBack(followUpText, themeItem, cardToUpdate.text);
-
-        if (backResult) addLogEntry({ type: 'chat-back', requestTimestamp: backResult.requestTimestamp, responseTimestamp: backResult.responseTimestamp, data: { input: backResult.inputPrompt, output: backResult.rawLlmOutput, error: backResult.error } });
-
-        const finalFollowUpCard: DrawnCardData = {
-          ...placeholderFollowUpCard,
-          cardBackNotesText: backResult?.cardBackNotesText || null,
-        };
         
-        setDrawnCardHistory(prev => prev.map(c =>
-          c.id === cardToUpdate.id ? { ...c, activeFollowUpCard: finalFollowUpCard } : c
-        ));
-        
-        if (!isAudioMuted && finalFollowUpCard.audioData && finalFollowUpCard.audioMimeType) {
-            handlePlayAudioForMainPrompt(finalFollowUpCard);
+        // Immediate play of cached audio if available
+        if (!isAudioMuted && placeholderFollowUpCard.audioData && placeholderFollowUpCard.audioMimeType) {
+             handlePlayAudioForMainPrompt(placeholderFollowUpCard);
         }
-        
+
+        // Background fetch for Card Back of follow-up (Only if Online)
+        if (!isOfflineMode && themeItem) {
+            generateCardBack(followUpText, themeItem, cardToUpdate.text).then(backResult => {
+                if (backResult) addLogEntry({ type: 'chat-back', requestTimestamp: backResult.requestTimestamp, responseTimestamp: backResult.responseTimestamp, data: { input: backResult.inputPrompt, output: backResult.rawLlmOutput, error: backResult.error } });
+                
+                setDrawnCardHistory(prev => prev.map(c =>
+                    c.id === cardToUpdate.id && c.activeFollowUpCard?.id === newId
+                        ? { ...c, activeFollowUpCard: { ...c.activeFollowUpCard!, cardBackNotesText: backResult.cardBackNotesText } } 
+                        : c
+                ));
+            });
+        }
+
         if (participants.length > 1) {
           const currentIndex = participants.findIndex(p => p.id === activeParticipantId);
           const nextIndex = (currentIndex + 1) % participants.length;
@@ -518,7 +611,7 @@ const App: React.FC = () => {
 
     generateFollowUp(sourceCard);
 
-  }, [drawnCardHistory, isLoading, isShuffling, customDecks, isAudioMuted, participants, activeParticipantId, addLogEntry, handlePlayAudioForMainPrompt, handleStopAudio]);
+  }, [drawnCardHistory, isLoading, isShuffling, customDecks, isAudioMuted, participants, activeParticipantId, addLogEntry, handlePlayAudioForMainPrompt, handleStopAudio, isOfflineMode]);
 
 
   const handleTimerEnd = useCallback((completedCardId: string) => {
@@ -558,10 +651,10 @@ const App: React.FC = () => {
       feedbackText = cardToUpdate.text;
     }
 
-    if (feedbackText) {
+    if (feedbackText && !isOfflineMode) {
       await sendFeedbackToChat(feedbackText, 'liked', addLogEntry);
     }
-  }, [drawnCardHistory, addLogEntry]);
+  }, [drawnCardHistory, addLogEntry, isOfflineMode]);
   
   const handleDislike = useCallback(async (cardId: string) => {
     if (isLoading || isShuffling) return;
@@ -590,7 +683,7 @@ const App: React.FC = () => {
       feedbackText = cardToUpdate.text;
     }
     
-    if (feedbackText) {
+    if (feedbackText && !isOfflineMode) {
         await sendFeedbackToChat(feedbackText, 'disliked', addLogEntry);
     }
     
@@ -610,7 +703,7 @@ const App: React.FC = () => {
             return card;
         }));
     }
-  }, [drawnCardHistory, isLoading, isShuffling, handleDrawNewCard, addLogEntry]);
+  }, [drawnCardHistory, isLoading, isShuffling, handleDrawNewCard, addLogEntry, isOfflineMode]);
 
   const handleAddCustomDeck = () => {
     if (isLoading) return;
@@ -732,11 +825,13 @@ const App: React.FC = () => {
               intensityFilters={intensityFilters}
               participants={participants}
               showAllDecks={showDevFeatures}
+              isOfflineMode={isOfflineMode}
+              onRetryConnection={handleRetryConnection}
             />
           </header>
           
           <main 
-            className="flex-grow w-full overflow-y-auto overflow-x-hidden scrollbar-thin flex justify-center p-4 md:p-6"
+            className="flex-grow w-full overflow-y-auto overflow-x-hidden scrollbar-thin flex flex-col items-center justify-start p-4 md:p-6"
           >
             {apiKeyMissing ? (
                 <div className="flex justify-center items-center h-full"><ApiKeyMessage /></div>
@@ -775,6 +870,7 @@ const App: React.FC = () => {
                 onOpenDevLog={handleOpenDevLog}
                 showDevLogButton={showDevFeatures}
                 disabled={isLoading || isShuffling}
+                isTtsAvailable={isTtsSystemAvailable} 
               />
           </footer>
       </div>
@@ -806,6 +902,8 @@ const App: React.FC = () => {
           currentVoice={selectedVoiceName} currentLanguage={selectedLanguageCode} isMuted={isAudioMuted}
           onVoiceChange={handleVoiceChange} onLanguageChange={handleLanguageChange} onMuteChange={handleMuteChange}
           onClose={() => setShowVoiceSettingsModal(false)} voicePersonas={CURATED_VOICE_PERSONAS}
+          isSystemAvailable={isTtsSystemAvailable} 
+          onRetryAvailabilityCheck={handleRetryConnection}
         />
       )}
       {showDeckInfoModal && itemForInfoModal && (
