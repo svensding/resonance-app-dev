@@ -1,4 +1,5 @@
 
+
 import React from 'react';
 import { CustomThemeData, ThemedDeck } from '../services/geminiService'; 
 import { CornerGlyphGrid } from './CornerGlyphGrid';
@@ -63,12 +64,10 @@ export const ThemedDeckButton: React.FC<ThemedDeckButtonProps> = ({
 
   if (isCategoryButton) {
     return (
-        <div
-            role="button"
-            tabIndex={drawActionDisabled ? -1 : 0}
+        <button
+            type="button"
+            disabled={drawActionDisabled}
             onClick={handleMainAction}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleMainAction();}}
-            aria-disabled={drawActionDisabled}
             aria-label={`Draw a random card from the ${itemName} category`}
             title={`Draw from: ${itemName}`}
             className={`relative w-full h-full group font-normal transition-all duration-300 ease-out rounded-lg focus:outline-none ${drawActionDisabled ? 'cursor-not-allowed opacity-70' : `hover:scale-105 active:scale-95 cursor-pointer ${ringClasses}`}`}
@@ -81,7 +80,7 @@ export const ThemedDeckButton: React.FC<ThemedDeckButtonProps> = ({
                     {itemName}
                 </h3>
             </div>
-        </div>
+        </button>
     );
   }
 
@@ -102,12 +101,10 @@ export const ThemedDeckButton: React.FC<ThemedDeckButtonProps> = ({
   const dynamicColorClass = visualStyle ? visualStyle : `bg-gradient-to-br ${colorClass}`;
 
   return (
-    <div
-      role="button"
-      tabIndex={drawActionDisabled ? -1 : 0}
+    <button
+      type="button"
+      disabled={drawActionDisabled}
       onClick={handleMainAction}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleMainAction();}}
-      aria-disabled={drawActionDisabled}
       aria-label={mainButtonLabel}
       title={mainButtonTitle}
       className={`relative w-full h-full group font-normal transition-all duration-300 ease-out rounded-lg focus:outline-none ${drawActionDisabled ? 'cursor-not-allowed opacity-70' : `hover:scale-105 active:scale-95 cursor-pointer ${ringClasses}`}`}
@@ -139,6 +136,7 @@ export const ThemedDeckButton: React.FC<ThemedDeckButtonProps> = ({
 
             {customDeckData && onEditCustomDeck && (
               <button
+                type="button"
                 onClick={handleEditClick}
                 disabled={utilityActionsDisabled}
                 className={`absolute top-[0.5vh] right-[0.5vh] ${utilityButtonBaseClasses} ${utilityActionsDisabled ? 'cursor-not-allowed !opacity-50' : ''}`}
@@ -153,6 +151,7 @@ export const ThemedDeckButton: React.FC<ThemedDeckButtonProps> = ({
 
             {(isDeckSet || customDeckData) && onShowInfo && ( 
                <button
+                type="button"
                 onClick={handleInfoClick}
                 disabled={utilityActionsDisabled}
                 className={`absolute ${customDeckData ? 'top-[0.5vh] left-[0.5vh]' : 'top-[0.5vh] right-[0.5vh]'} ${utilityButtonBaseClasses} ${utilityActionsDisabled ? 'cursor-not-allowed !opacity-50' : ''}`}
@@ -182,6 +181,6 @@ export const ThemedDeckButton: React.FC<ThemedDeckButtonProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </button>
   );
 };

@@ -37,7 +37,7 @@ import {
   performHealthCheck,
   resetChatSession,
 } from './services/geminiService';
-import { playAudioData, speakText, stopSpeechServicePlayback } from './services/speechService'; 
+import { playAudioData, speakText, stopSpeechServicePlayback, resumeAudioContext } from './services/speechService'; 
 import { ApiKeyMessage } from './components/ApiKeyMessage';
 import { ThemeDeckSelection } from './components/ThemeDeckSelection';
 import { DrawnCardsHistoryView } from './components/DrawnCardsHistoryView';
@@ -158,7 +158,7 @@ const App: React.FC = () => {
 
 
   useEffect(() => {
-    console.log("App mounted. Resonance (New Recipe Architecture).");
+    console.log("App mounted. Resonance (Gemini 3 Update).");
     if (!process.env.API_KEY) {
       setApiKeyMissing(true);
       setError("API_KEY for Gemini is not configured.");
@@ -201,6 +201,9 @@ const App: React.FC = () => {
       card: DrawnCardData
     ) => {
         handleStopAudio();
+        // Immediately try to resume context on user interaction (if this comes from a click)
+        await resumeAudioContext();
+
         setActiveCardAudio({ cardId: card.id, type: 'prompt' });
         const onPlaybackEnd = () => setActiveCardAudio(null);
         
@@ -224,7 +227,6 @@ const App: React.FC = () => {
             });
 
             if (audioResult.audioData && audioResult.audioMimeType) {
-                // Also update the card in history with the generated data so we don't regenerate next time
                 setDrawnCardHistory(prev => prev.map(c => 
                     c.id === card.id ? { ...c, audioData: audioResult.audioData, audioMimeType: audioResult.audioMimeType } : c
                 ));
@@ -232,7 +234,7 @@ const App: React.FC = () => {
             } else {
                 setActiveCardAudio(null);
             }
-        } else if (card.text) { // Fallback to system TTS
+        } else if (card.text) { 
             speakText(card.text, selectedLanguageCode, isAudioMuted, onPlaybackEnd);
         } else {
             setActiveCardAudio(null);
@@ -241,6 +243,9 @@ const App: React.FC = () => {
 
   const handleFetchAndPlayCardBackAudio = useCallback(async (cardId: string, textToSpeak: string) => {
     handleStopAudio();
+    // Resume context to ensure playback is authorized
+    await resumeAudioContext();
+
     setActiveCardAudio({ cardId, type: 'notes' });
 
     try {
@@ -280,6 +285,10 @@ const App: React.FC = () => {
   const handleDrawNewCard = useCallback(async (itemId: ThemeIdentifier | "RANDOM" | `CATEGORY_${string}`, options?: { isRedraw?: boolean }) => {
     if (isLoading || isShuffling) return;
 
+    // --- CRITICAL AUDIO FIX ---
+    // Initialize/Resume AudioContext synchronously within the user event handler
+    await resumeAudioContext();
+
     const performDraw = async () => {
         handleStopAudio();
         setIsLoading(true);
@@ -297,7 +306,7 @@ const App: React.FC = () => {
                 chosenDeck = visibleDecks[Math.floor(Math.random() * visibleDecks.length)];
                  colorsForShuffle = visibleDecks
                     .map(d => getDisplayDataForCard(d.id, customDecks).colorClass)
-                    .sort(() => 0.5 - Math.random()) // shuffle
+                    .sort(() => 0.5 - Math.random()) 
                     .slice(0, 6);
             } else if (itemId.startsWith("CATEGORY_")) {
                 const categoryId = itemId.replace("CATEGORY_", "");
@@ -337,11 +346,9 @@ const App: React.FC = () => {
             }
             
             let audioPromise;
-            // Use LLM-provided TTS data if it's valid and we're not muted
             if (!isAudioMuted && frontResult.ttsInput && frontResult.ttsInput.trim().length > 0 && frontResult.ttsVoice) {
                 audioPromise = generateAudioForText(frontResult.ttsInput, frontResult.ttsVoice, null);
             } 
-            // **Forced TTS Fallback:** If the LLM didn't provide valid TTS data, but we have card text, generate audio anyway.
             else if (!isAudioMuted && frontResult.text) {
                 console.warn("Forcing TTS generation due to missing or invalid LLM TTS data.");
                 addLogEntry({
@@ -355,7 +362,6 @@ const App: React.FC = () => {
                 const ttsPrompt = `${styleDirective} "${frontResult.text}"`;
                 audioPromise = generateAudioForText(ttsPrompt, selectedVoiceName, null);
             } 
-            // Otherwise, no audio will be generated
             else {
                 audioPromise = Promise.resolve(null);
             }
@@ -384,7 +390,7 @@ const App: React.FC = () => {
 
             const newCardId = `card-${Date.now()}`;
             const activeParticipant = participants.find(p => p.id === activeParticipantId);
-            const isTimed = !!frontResult.reflectionText;
+            const isTimed = !!frontResult.reflectionText; // Presence of reflection text implies activity in new schema
 
             const newCard: DrawnCardData = {
                 id: newCardId,
@@ -433,9 +439,7 @@ const App: React.FC = () => {
 
   }, [isLoading, isShuffling, participants, activeParticipantId, customDecks, selectedVoiceName, selectedLanguageCode, handleStopAudio, isAudioMuted, selectedGroupSetting, ageFilters, intensityFilters, drawnCardHistory.length, addLogEntry, showDevFeatures]);
 
-  // This effect handles generating the follow-up card after a timed activity is completed.
   useEffect(() => {
-    // Find the first card that has completed its activity but doesn't have a follow-up card yet.
     const sourceCard = drawnCardHistory.find(c =>
       c.isCompletedActivity && c.hasFollowUp && c.followUpPromptText && !c.activeFollowUpCard
     );
@@ -469,9 +473,9 @@ const App: React.FC = () => {
           drawnForParticipantName: activeP?.name || null,
           isFaded: false,
           text: followUpText,
-          ttsInput: null, // Follow-up cards don't get LLM-generated TTS prompts
+          ttsInput: null, 
           ttsVoice: null,
-          audioData: cardToUpdate.followUpAudioData, // Use pre-fetched audio
+          audioData: cardToUpdate.followUpAudioData, 
           audioMimeType: cardToUpdate.followUpAudioMimeType,
           cardBackNotesText: null,
           isTimed: false, hasFollowUp: false, timerDuration: null, followUpPromptText: null,
@@ -481,7 +485,6 @@ const App: React.FC = () => {
         
         setDrawnCardHistory(prev => prev.map(c => c.id === cardToUpdate.id ? { ...c, activeFollowUpCard: placeholderFollowUpCard } : c));
 
-        // Generate card back while card is showing placeholder
         const backResult = await generateCardBack(followUpText, themeItem, cardToUpdate.text);
 
         if (backResult) addLogEntry({ type: 'chat-back', requestTimestamp: backResult.requestTimestamp, responseTimestamp: backResult.responseTimestamp, data: { input: backResult.inputPrompt, output: backResult.rawLlmOutput, error: backResult.error } });

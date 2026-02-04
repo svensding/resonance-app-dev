@@ -1,8 +1,5 @@
 
 
-
-
-
 let audioContext: AudioContext | null = null;
 let currentSource: AudioBufferSourceNode | null = null;
 let currentUtterance: SpeechSynthesisUtterance | null = null;
@@ -20,6 +17,19 @@ const getAudioContext = (): AudioContext | null => {
     }
   }
   return audioContext;
+};
+
+// --- NEW HELPER FOR STABILITY ---
+// Call this synchronously inside a click handler (e.g. Draw Card button)
+export const resumeAudioContext = async (): Promise<void> => {
+    const ctx = getAudioContext();
+    if (ctx && ctx.state === 'suspended') {
+        try {
+            await ctx.resume();
+        } catch (e) {
+            console.warn("Failed to resume audio context on interaction", e);
+        }
+    }
 };
 
 
@@ -130,6 +140,7 @@ export const playAudioData = async (
   const context = getAudioContext();
   if (!context) return;
 
+  // Attempt to resume if suspended, though this relies on prior user interaction
   if (context.state === 'suspended') {
     try { await context.resume(); } catch (e) { console.error("Failed to resume AudioContext:", e); return; }
   }
