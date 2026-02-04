@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <desc>Resonance App Icon - Glyph Alignment</desc>
+  
+  <!-- Background: Slate 900 -->
+  <rect width="64" height="64" rx="16" fill="#0f172a" />
+  
+  <!-- Outer Circle (The Whole/Self) -->
+  <!-- Color: Sky-500, Lower Opacity for depth -->
+  <circle cx="32" cy="34" r="20" stroke="#0ea5e9" stroke-width="2.5" fill="none" opacity="0.5" />
+  
+  <!-- Triangle (Structure/Direction) -->
+  <!-- Color: Slate-100, High Opacity for contrast -->
+  <path d="M32 16 L50 48 H14 Z" stroke="#f1f5f9" stroke-width="2.5" fill="none" stroke-linejoin="round" stroke-linecap="round" />
+  
+  <!-- The Resonance Point (Center) -->
+  <!-- Color: Sky-200 with a subtle glow -->
+  <circle cx="32" cy="36" r="3.5" fill="#bae6fd" />
+  
+  <!-- Subtle Glow Effect on the center dot -->
+  <circle cx="32" cy="36" r="6" fill="#38bdf8" opacity="0.3" />
+</svg>
