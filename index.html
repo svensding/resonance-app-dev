@@ -3,7 +3,7 @@
 <html lang="en" class="h-full">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>RESONANCE</title>
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
@@ -50,6 +50,16 @@
       flex-direction: column;
     }
 
+    /* Mobile Scaling Implementation - 15% reduction */
+    @media (max-width: 640px) {
+      .mobile-scale-root {
+        transform: scale(0.85);
+        transform-origin: top center;
+        width: 117.64% !important; /* 1 / 0.85 approx 117.64% */
+        height: 117.64% !important;
+      }
+    }
+
     body::after { 
       content: "⦾ \00a0 \00a0 \00a0 ⋈ \00a0 \00a0 \00a0 ⟁ \00a0 \00a0 \00a0 ⟐";
       position: fixed;
@@ -57,7 +67,7 @@
       left: 0;
       width: 200%; 
       height: 200%; 
-      font-size: clamp(30px, 7vw, 80px); /* Adjusted for better mobile scaling */
+      font-size: clamp(30px, 7vw, 80px); 
       color: rgba(203, 213, 225, 0.008); 
       line-height: 1.8em; 
       white-space: pre;
@@ -66,12 +76,6 @@
       z-index: -1;
       transform: translate(-25%, -25%) rotate(-15deg); 
       animation: backgroundPatternScroll 120s linear infinite;
-    }
-
-    @media (min-width: 640px) { /* sm breakpoint */
-      body::after {
-        color: rgba(203, 213, 225, 0.01);
-      }
     }
 
     @keyframes backgroundPatternScroll {
@@ -88,13 +92,11 @@
     .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.7); }
     .scrollbar-thin { scrollbar-width: thin; scrollbar-color: rgba(100, 116, 139, 0.5) transparent; }
 
-    /* Perspective and 3D styles for card flip */
     .perspective { perspective: 1000px; }
     .preserve-3d { transform-style: preserve-3d; }
     .backface-hidden { backface-visibility: hidden; -webkit-backface-visibility: hidden; }
     .rotate-y-180 { transform: rotateY(180deg); }
     
-    /* Shimmer effect for loading/new cards */
     .shimmer-effect {
       position: relative;
       overflow: hidden;
@@ -114,21 +116,13 @@
       50% { left: 100%; }
       100% { left: 100%; } 
     }
-    .animate-pulse-slow {
-      animation: pulse-slow 2.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-    }
-    @keyframes pulse-slow {
-      0%, 100% { opacity: 0.8; }
-      50% { opacity: 1; }
-    }
 
-    /* Card Shuffle Animation */
     .shuffle-card {
       position: absolute;
       width: 100%;
       height: 100%;
-      border-radius: 1rem; /* rounded-xl */
-      border: 1px solid rgba(71, 85, 105, 0.6); /* border-slate-700/60 */
+      border-radius: 1rem; 
+      border: 1px solid rgba(71, 85, 105, 0.6); 
       box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.1);
       will-change: transform, opacity, z-index;
       backface-visibility: hidden;
@@ -160,8 +154,6 @@
     .animate-shuffle-5 { animation: shuffle-card-2 3.5s cubic-bezier(0.45, 0, 0.55, 1) infinite; animation-delay: 0.8s; }
     .animate-shuffle-6 { animation: shuffle-card-3 3.5s cubic-bezier(0.45, 0, 0.55, 1) infinite; animation-delay: 1s; }
 
-
-    /* Initial Loading State Styles */
     .initial-loading-state {
       display: flex;
       flex-direction: column;
@@ -169,49 +161,34 @@
       justify-content: center;
       text-align: center;
       padding: 20px;
-      color: #cbd5e1; /* slate-300 for glyphs */
+      color: #cbd5e1; 
       font-family: 'Atkinson Hyperlegible', sans-serif;
       flex-grow: 1;
     }
     .brand-logo-initial-text {
       font-family: 'Atkinson Hyperlegible', sans-serif;
       font-size: clamp(1.5rem, 5vh, 2.8rem); 
-      font-weight: 200; /* Atkinson Hyperlegible Light/ExtraLight */
+      font-weight: 200; 
       letter-spacing: 0.15em; 
-      color: rgba(203, 213, 225, 0.9); /* slate-300 with slight transparency */
+      color: rgba(203, 213, 225, 0.9); 
       text-transform: uppercase;
       line-height: 1.2; 
-      margin: 0.5em 0; /* Matches component */
+      margin: 0.5em 0; 
     }
     .glyph-pattern-row-initial {
       display: flex;
       justify-content: center;
       align-items: center;
-      gap: 1em; /* em-space equivalent */
+      gap: 1em; 
       line-height: tight;
-      font-size: clamp(1rem,3.5vh,2rem); /* Matches component */
-      color: #64748b; /* slate-500 for glyphs */
-      margin-bottom: 0.3em; /* Matches component */
+      font-size: clamp(1rem,3.5vh,2rem); 
+      color: #64748b; 
+      margin-bottom: 0.3em; 
     }
-    .glyph-pattern-row-initial:last-child {
-      margin-bottom: 0;
-    }
-    .glyph-initial.opacity-33 { opacity: 0.33; }
-    .glyph-initial.opacity-66 { opacity: 0.66; }
-    .glyph-initial.opacity-90 { opacity: 0.9; }
-
     .font-atkinson-mono {
       font-family: 'Atkinson Hyperlegible Mono', monospace;
     }
 
-    /* --- Custom Deck Visual Styles --- */
-    /* To create a new visual style:
-       1. Define a CSS class below (e.g., .my-cool-style).
-       2. Add any animations or pseudo-elements you need.
-       3. In `geminiService.ts`, add `visualStyle: 'my-cool-style'` to a deck's definition.
-    */
-
-    /* Style 1: Psychedelic (Woah Dude!) */
     .psychedelic-bg {
         background: linear-gradient(-45deg, #ee7752, #e73c7e, #23a6d5, #23d5ab);
         background-size: 400% 400%;
@@ -223,7 +200,6 @@
         100% { background-position: 0% 50%; }
     }
 
-    /* Style 2: Noir (The Shadow Cabinet) */
     .noir-bg {
         background-color: #1a1a1a;
         background-image:
@@ -257,7 +233,6 @@
       90% { transform: translate(-10%, 10%); }
     }
 
-    /* Style 3: Celestial (Awe & Wonder) */
     .celestial-bg {
         background-color: #0c0a1a;
         background-image: 
@@ -274,18 +249,15 @@
         background: white;
         border-radius: 50%;
         box-shadow: 
-            /* Star field 1 */
             60vw 80vh 2px 0px #fff, 10vw 20vh 1px 0px #fff, 85vw 30vh 1px 0px #fff,
             40vw 90vh 2px 0px #fff, 70vw 10vh 1px 0px #fff, 20vw 70vh 1px 0px #fff,
             90vw 60vh 2px 0px #fff, 5vw 50vh 1px 0px #fff, 50vw 5vh 1px 0px #fff,
-            /* Star field 2 */
             30vw 40vh 1px 0px #fff, 80vw 75vh 2px 0px #fff, 15vw 85vh 1px 0px #fff,
             95vw 15vh 1px 0px #fff, 45vw 65vh 2px 0px #fff;
         animation: twinkle 15s linear infinite;
     }
     .celestial-bg::after {
         box-shadow: 
-            /* Star field 3 (different positions) */
             5vw 95vh 1px 0px #fff, 95vw 5vh 2px 0px #fff, 25vw 50vh 1px 0px #fff,
             75vw 25vh 2px 0px #fff, 50vw 80vh 1px 0px #fff, 5vw 5vh 1px 0px #fff;
         animation: twinkle 20s linear infinite;
@@ -300,7 +272,6 @@
 </head>
 <body class="font-normal">
   <div id="root">
-    <!-- Initial loading state: will be replaced by React app -->
     <div class="initial-loading-state">
       <div class="glyph-pattern-row-initial">
         <span class="glyph-initial opacity-33">⦾</span>

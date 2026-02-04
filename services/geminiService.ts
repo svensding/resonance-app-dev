@@ -150,23 +150,18 @@ export const generateCardFront = async (
     let chat = chatSessions[sessionId];
     lastActiveSessionId = sessionId;
 
-    // Construct System Instruction
-    const contextDesc = `Social Context: ${groupSetting}. Participants: ${numParticipants} (${participantNames.join(', ')}). Active Player: ${activeParticipantName || 'Unknown'}.`;
-    const deckDesc = `Deck: ${deck.name}. Description: ${deck.description}. Intensity: ${(deck.intensity || []).join(', ')}.`;
+    // Strict instructions to prevent internal reasoning/babbling in JSON
+    const systemInstruction = `You are Resonance, a facilitator for connection. 
+    CURRENT LANGUAGE: ${languageCode}. ALL TEXT FIELDS MUST BE IN ${languageCode}.
+    DECK: ${deck.name}. DESC: ${deck.description}. INTENSITY: ${(deck.intensity || []).join(', ')}.
+    CONTEXT: ${groupSetting} for ${numParticipants} players: ${participantNames.join(', ')}. Active: ${activeParticipantName || 'Unknown'}.
     
-    const systemInstruction = `You are Resonance, an AI facilitator for deep human connection. 
-    ${deckDesc}
-    ${contextDesc}
-    Generate a single card prompt. It should be insightful, engaging, and fit the deck theme.
-    
-    Return a JSON object with the following schema:
-    {
-        "text": "The main prompt text to be displayed on the card.",
-        "ttsInput": "Optional. A version of the text optimized for speech synthesis (e.g. phonetic spellings or conversational tweaks). If null, 'text' will be used.",
-        "ttsVoice": "Optional. Recommended voice name.",
-        "reflectionText": "Optional. A follow-up question or reflection prompt if the card is an activity or timed exercise.",
-        "timerDuration": "Optional. Duration in seconds if the card is a timed activity."
-    }
+    TASK: Generate one prompt card. 
+    STRICT RULES:
+    1. Output MUST be valid JSON ONLY. No markdown. No conversational filler.
+    2. NEVER include internal monologue or reasoning in JSON values.
+    3. ttsVoice MUST be exactly one of: achernar, achird, algenib, algieba, alnilam, aoede, autonoe, callirrhoe, charon, despina, enceladus, erinome, fenrir, gacrux, iapetus, kore, laomedeia, leda, orus, puck, pulcherrima, rasalgethi, sadachbia, sadaltager, schedar, sulafat, umbriel, vindemiatrix, zephyr, zubenelgenubi.
+    4. If no specific voice is needed, use 'enceladus'.
     `;
 
     if (!chat) {
@@ -178,10 +173,10 @@ export const generateCardFront = async (
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        text: { type: Type.STRING },
-                        ttsInput: { type: Type.STRING },
-                        ttsVoice: { type: Type.STRING },
-                        reflectionText: { type: Type.STRING },
+                        text: { type: Type.STRING, description: `Prompt text in ${languageCode}` },
+                        ttsInput: { type: Type.STRING, description: `Spoken prompt in ${languageCode}` },
+                        ttsVoice: { type: Type.STRING, description: "Exactly one valid voice name string." },
+                        reflectionText: { type: Type.STRING, description: `Follow-up in ${languageCode}` },
                         timerDuration: { type: Type.INTEGER }
                     },
                     required: ["text"]
@@ -191,7 +186,7 @@ export const generateCardFront = async (
         chatSessions[sessionId] = chat;
     }
 
-    const prompt = options.disliked ? "The previous card was disliked. Generate a different kind of prompt from this deck." : "Draw a card.";
+    const prompt = options.disliked ? `Generate a new card in ${languageCode}. The last one was disliked.` : `Generate card in ${languageCode}.`;
 
     try {
         const result = await chat.sendMessage({ message: prompt });
@@ -203,13 +198,19 @@ export const generateCardFront = async (
             parsed = JSON.parse(jsonText);
         } catch (e) {
              console.error("JSON parse error", e);
-             parsed = { text: jsonText };
+             // Attempt to strip code blocks if model ignored rules
+             const match = jsonText.match(/\{[\s\S]*\}/);
+             if (match) {
+                 try { parsed = JSON.parse(match[0]); } catch(e2) { parsed = { text: jsonText }; }
+             } else {
+                 parsed = { text: jsonText };
+             }
         }
 
         return {
             text: parsed.text,
             ttsInput: parsed.ttsInput || null,
-            ttsVoice: parsed.ttsVoice || null,
+            ttsVoice: (parsed.ttsVoice || voiceName) as VoiceName,
             reflectionText: parsed.reflectionText,
             timerDuration: parsed.timerDuration,
             requestTimestamp,
@@ -246,7 +247,7 @@ export const generateCardBack = async (
 }> => {
      if (!ai) return { cardBackNotesText: null, requestTimestamp: Date.now(), responseTimestamp: Date.now(), inputPrompt: "", rawLlmOutput: "", error: "AI not initialized" };
      
-     const prompt = `Generate guidance for this card prompt: "${cardText}" from deck "${deck.name}". Include "The Idea", "Getting Started", and "Deeper Dive".`;
+     const prompt = `Provide guidance for the prompt: "${cardText}". Include "The Idea", "Getting Started", and "Deeper Dive". Respond in the SAME LANGUAGE as the prompt.`;
      const requestTimestamp = Date.now();
      
      try {
@@ -281,6 +282,13 @@ export const generateAudioForText = async (
     if (!ai) return { audioData: null, audioMimeType: null, requestTimestamp: Date.now(), responseTimestamp: Date.now(), logData: {}, error: "AI not initialized" };
     
     const requestTimestamp = Date.now();
+    // Validate voice name before calling API to prevent 400s
+    const validVoices = ['achernar', 'achird', 'algenib', 'algieba', 'alnilam', 'aoede', 'autonoe', 'callirrhoe', 'charon', 'despina', 'enceladus', 'erinome', 'fenrir', 'gacrux', 'iapetus', 'kore', 'laomedeia', 'leda', 'orus', 'puck', 'pulcherrima', 'rasalgethi', 'sadachbia', 'sadaltager', 'schedar', 'sulafat', 'umbriel', 'vindemiatrix', 'zephyr', 'zubenelgenubi'];
+    let sanitizedVoice = voiceName.toLowerCase();
+    if (!validVoices.includes(sanitizedVoice)) {
+        sanitizedVoice = 'enceladus';
+    }
+
     try {
         const response = await ai.models.generateContent({
             model: TTS_MODEL,
@@ -291,7 +299,7 @@ export const generateAudioForText = async (
                 responseModalities: [Modality.AUDIO],
                 speechConfig: {
                     voiceConfig: {
-                        prebuiltVoiceConfig: { voiceName }
+                        prebuiltVoiceConfig: { voiceName: sanitizedVoice as VoiceName }
                     }
                 }
             }
@@ -304,7 +312,7 @@ export const generateAudioForText = async (
                 audioMimeType: audioPart.inlineData.mimeType,
                 requestTimestamp,
                 responseTimestamp: Date.now(),
-                logData: { text, voiceName }
+                logData: { text, voiceName: sanitizedVoice }
             };
         }
         return { audioData: null, audioMimeType: null, requestTimestamp, responseTimestamp: Date.now(), logData: { text }, error: "No audio data" };
@@ -319,12 +327,10 @@ export const sendFeedbackToChat = async (
     feedbackType: 'liked' | 'disliked',
     addLogEntry: (entry: DevLogEntry) => void
 ) => {
-    // If we have an active session, we could send feedback to it.
-    // Since App.tsx calls this without session context, we try to use the last active one or just log.
     if (lastActiveSessionId && chatSessions[lastActiveSessionId]) {
         try {
             const chat = chatSessions[lastActiveSessionId];
-            await chat.sendMessage({ message: `User feedback: The user ${feedbackType} the prompt "${text}".` });
+            await chat.sendMessage({ message: `Feedback: User ${feedbackType} "${text}".` });
             addLogEntry({
                 type: 'user-feedback',
                 requestTimestamp: Date.now(),
@@ -332,14 +338,10 @@ export const sendFeedbackToChat = async (
                 data: { input: text, output: feedbackType }
             });
         } catch (e) {
-            console.warn("Failed to send feedback to chat session", e);
+            console.warn("Feedback fail", e);
         }
-    } else {
-        console.log(`Feedback (No Session): ${feedbackType} for "${text}"`);
     }
 }
-
-// --- BACKUP CARDS (OFFLINE MODE) ---
 
 const BACKUP_CARDS = [
     { text: "What is a small, simple thing that brought you a sense of ease or joy today?", category: "INTRODUCTIONS" },
@@ -364,23 +366,16 @@ const BACKUP_CARDS = [
     { text: "If you were a character in a book, how would the author describe you?", category: "IMAGINATIVE" }
 ];
 
-// Track used indices to avoid repetition until exhausted
 let usedBackupIndices = new Set<number>();
 
 export const drawOfflineCard = (): DrawnCardData => {
-    // Determine available indices
     const availableIndices = BACKUP_CARDS.map((_, i) => i).filter(i => !usedBackupIndices.has(i));
-    
-    // Reset if all used
     if (availableIndices.length === 0) {
         usedBackupIndices.clear();
         BACKUP_CARDS.forEach((_, i) => availableIndices.push(i));
     }
-
-    // Pick random from available
     const randomIndex = availableIndices[Math.floor(Math.random() * availableIndices.length)];
     usedBackupIndices.add(randomIndex);
-    
     const randomCard = BACKUP_CARDS[randomIndex];
     const id = `offline-card-${Date.now()}`;
     return {
@@ -416,10 +411,8 @@ export const OFFLINE_DECK: ThemedDeck = {
     themes: ['Light & Essence', 'Mind & Thoughts'],
     cardTypes: ['Question'],
     ageGroups: ['Adults', 'Teens', 'Kids'],
-    // Updated to match look and feel of other decks (Gradient instead of dashed border)
     visualStyle: 'bg-gradient-to-br from-slate-600 via-slate-700 to-slate-800' 
 };
-
 
 // --- TYPES ---
 
@@ -556,7 +549,7 @@ export const ALL_THEMED_DECKS: ThemedDeck[] = [
     { id: 'THE_WRITERS_ROOM', name: "The Writer's Room", category: 'IMAGINATIVE', description: "A deck of creative kindling. Sentence stems and fill-in-the-blanks to bypass the blank page and start writing.", intensity: [2, 3], themes: ['Play & Creativity', 'Mind & Thoughts', 'Past & Memory'], cardTypes: ['Reflection'], ageGroups: ['Adults', 'Teens'], socialContexts: ['SOLO'], },
     { id: 'THE_DILEMMA_ENGINE', name: 'The Dilemma Engine', category: 'IMAGINATIVE', description: "Choose your path. A series of intriguing dilemmas that reveal values, priorities, and hidden beliefs.", intensity: [2, 3], themes: ['Mind & Thoughts', 'Light & Essence', 'Outer World'], cardTypes: ['Question'], ageGroups: ['Adults', 'Teens'], },
     { id: 'THE_DREAM_FACTORY', name: 'The Dream Factory', category: 'IMAGINATIVE', description: "A launchpad for imagination. Prompts to generate ideas, play with possibilities, and create something new.", intensity: [2, 3], themes: ['Play & Creativity', 'Vision & Future'], cardTypes: ['Directive', 'Wildcard'], ageGroups: ['Adults', 'Teens', 'Kids'], },
-    { id: 'PATTERN_INTERRUPT', name: 'Pattern Interrupt', category: 'IMAGINATIVE', description: "Feeling stuck or too heavy? Draw from this deck to shift the energy with a jolt of playfulness or a fresh perspective.", intensity: [1, 2], themes: ['Play & Creativity', 'Mind & Thoughts', 'CardTypes', 'Wildcard', 'Question'], cardTypes: ['Wildcard', 'Question'], ageGroups: ['Adults', 'Teens', 'Kids'], },
+    { id: 'PATTERN_INTERRUPT', name: 'Pattern Interrupt', category: 'IMAGINATIVE', description: "Feeling stuck or too heavy? Draw from this deck to shift the energy with a jolt of playfulness or a fresh perspective.", intensity: [1, 2], themes: ['Play & Creativity', 'Mind & Thoughts'], cardTypes: ['Wildcard', 'Question'], ageGroups: ['Adults', 'Teens', 'Kids'], },
     { id: 'THE_SHADOW_CABINET', name: 'The Shadow Cabinet', category: 'EDGY_CONFRONTATIONS', description: "What we hide holds power. A courageous exploration of triggers, shame, and the unowned parts of yourself.", intensity: [3, 4], themes: ['Shadow & Depth', 'Parts & Voices'], cardTypes: ['Question', 'Reflection'], ageGroups: ['Adults', 'Teens'], visualStyle: 'noir-bg', },
     { id: 'ON_THE_EDGE', name: 'On The Edge', category: 'EDGY_CONFRONTATIONS', description: "For conversations that matter. Explore charged topics, withheld truths, and challenging perspectives with intention.", intensity: [4], themes: ['Shadow & Depth', 'Desire & Intimacy', 'Heart & Emotions'], cardTypes: ['Question', 'Directive'], ageGroups: ['Adults'], },
     { id: 'NO_MASKS', name: 'No Masks', category: 'EDGY_CONFRONTATIONS', description: "A space for radical honesty and unfiltered expression. For those ready to meet the depths without reservation.", intensity: [5], themes: ['Shadow & Depth', 'Desire & Intimacy', 'Heart & Emotions', 'Light & Essence', 'Transcendence & Mystery'], cardTypes: ['Question', 'Directive'], ageGroups: ['Adults'], },
